@@ -20,6 +20,9 @@ MIN_WITHDRAW = int(os.getenv('MIN_WITHDRAW', 50))
 DAILY_BONUS = int(os.getenv('DAILY_BONUS', 2))
 REFERRAL_BONUS = int(os.getenv('REFERRAL_BONUS', 5))
 
+# Чат для аналитики
+ANALYTICS_CHAT_ID = os.getenv('ANALYTICS_CHAT_ID')
+
 # 👑 Админы бота
 ADMIN_IDS = [int(id_) for id_ in os.getenv('ADMIN_IDS', '').split(',') if id_]
 
@@ -237,6 +240,11 @@ async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 🚀 Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Временная функция для получения ID чата
+    if update.message and update.message.chat.type in ['group', 'supergroup']:
+        await update.message.reply_text(f"ID этого чата: `{update.message.chat.id}`", parse_mode=ParseMode.MARKDOWN)
+        return
+
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name or "Друг"
     ref = context.args[0] if context.args else None
@@ -1072,31 +1080,74 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         logger.exception("Ошибка при отправке сообщения об ошибке")
 
+async def send_analytics(context: ContextTypes.DEFAULT_TYPE):
+    """Отправка сообщения в чат каждые 5 минут"""
+    if not ANALYTICS_CHAT_ID:
+        logger.error("ANALYTICS_CHAT_ID не настроен")
+        return
+        
+    now = datetime.now()
+    message_text = f"""🤖 *Проверка работы бота*
+📅 {now.strftime('%d.%m.%Y %H:%M')}
+
+✅ Бот работает нормально
+👥 Всего пользователей: {len(users)}"""
+
+    try:
+        await context.bot.send_message(
+            chat_id=ANALYTICS_CHAT_ID,
+            text=message_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        logger.info("Тестовое сообщение успешно отправлено")
+    except Exception as e:
+        logger.error(f"Ошибка отправки сообщения: {e}")
+
+async def get_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получение ID текущего чата"""
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(f"ID этого чата: `{chat_id}`", parse_mode=ParseMode.MARKDOWN)
+
 def main():
     """Запуск бота"""
-    try:
-        # Создание приложения
-        application = Application.builder().token(TOKEN).build()
+    # Создание приложения
+    application = Application.builder().token(TOKEN).build()
 
-        # Добавление обработчиков команд
-        application.add_handler(CommandHandler("start", start))
-        
-        # Обработчики кнопок
-        application.add_handler(CallbackQueryHandler(handle_subscription_check, pattern="^check_subscription$"))
-        application.add_handler(CallbackQueryHandler(button))
-        
-        # Обработчик текстовых сообщений
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        # Добавляем обработчик ошибок
-        application.add_error_handler(error_handler)
-        
-        # Запуск бота
-        logger.info("🚀 Бот запущен и готов к работе!")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-    except Exception as e:
-        logger.critical(f"Критическая ошибка при запуске бота: {e}")
-        raise
+    # Регистрация обработчиков
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("chatid", get_chat_id))
+    application.add_handler(CallbackQueryHandler(handle_subscription_check, pattern="^check_subscription$"))
+    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_error_handler(error_handler)
+
+    # Настройка периодической отправки аналитики
+    job_queue = application.job_queue
+    job_queue.run_repeating(send_analytics, interval=300, first=10)
+
+    # Отправка сообщения о запуске бота
+    async def send_startup_message(context: ContextTypes.DEFAULT_TYPE):
+        if ANALYTICS_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ANALYTICS_CHAT_ID,
+                    text="🚀 *Бот успешно запущен!*\n\n📅 Время запуска: " + datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                logger.info("Отправлено сообщение о запуске бота")
+            except Exception as e:
+                logger.error(f"Ошибка отправки сообщения о запуске: {e}")
+    
+    # Запускаем отправку сообщения о старте
+    application.job_queue.run_once(send_startup_message, when=1)
+
+    # Запуск бота
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем!")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
