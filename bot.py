@@ -1132,7 +1132,7 @@ async def get_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await update.message.reply_text(f"ID этого чата: `{chat_id}`", parse_mode=ParseMode.MARKDOWN)
 
-def main():
+async def main():
     """Запуск бота"""
     # Создание приложения
     application = Application.builder().token(TOKEN).build()
@@ -1172,12 +1172,8 @@ def main():
         webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}"
         
         # Принудительно устанавливаем webhook
-        async def set_webhook():
-            await application.bot.set_webhook(url=webhook_url)
-            logger.info(f"Webhook установлен на URL: {webhook_url}")
-        
-        # Вызываем установку вебхука
-        asyncio.run(set_webhook())
+        await application.bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook установлен на URL: {webhook_url}")
         
         # Запускаем приложение в режиме webhook
         application.run_webhook(
@@ -1198,7 +1194,7 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем!")
     except Exception as e:
