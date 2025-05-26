@@ -1152,16 +1152,37 @@ async def main():
     try:
         # Инициализация приложения
         await application.initialize()
-        await application.start()
         
         # Настройка периодической отправки аналитики
         job_queue = application.job_queue
         job_queue.run_repeating(send_analytics, interval=300, first=10)
 
         if webhook_url:
-            # Запуск в режиме webhook на Render.com
-            await application.bot.set_webhook(url=webhook_url)
-            logger.info(f"Webhook установлен на URL: {webhook_url}")
+            # Настройка webhook для Render.com
+            logger.info(f"Настройка webhook на URL: {webhook_url}")
+            
+            # Удаляем старый webhook перед установкой нового
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            
+            # Добавляем задержку перед установкой нового webhook для избежания rate limiting
+            await asyncio.sleep(2)
+            
+            # Устанавливаем новый webhook с защитой от rate limiting
+            for attempt in range(3):
+                try:
+                    await application.bot.set_webhook(
+                        url=webhook_url,
+                        allowed_updates=["message", "callback_query", "chat_member"],
+                        drop_pending_updates=True,
+                        max_connections=100
+                    )
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        logger.error(f"Не удалось установить webhook после 3 попыток: {e}")
+                        raise
+                    logger.warning(f"Попытка {attempt + 1} установки webhook не удалась: {e}")
+                    await asyncio.sleep(5)
             
             # Отправка сообщения о запуске
             if ANALYTICS_CHAT_ID:
@@ -1171,42 +1192,31 @@ async def main():
                         text="🚀 *Бот успешно запущен в режиме webhook!*\n\n📅 Время запуска: " + datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
                         parse_mode=ParseMode.MARKDOWN
                     )
-                    logger.info("Отправлено сообщение о запуске бота")
                 except Exception as e:
                     logger.error(f"Ошибка отправки сообщения о запуске: {e}")
             
-            # Запуск webhook сервера с правильной конфигурацией
+            # Запуск webhook сервера
+            logger.info(f"Запуск webhook сервера на порту {port}")
+            await application.start()
             await application.updater.start_webhook(
                 listen='0.0.0.0',
                 port=port,
                 url_path=TOKEN,
                 webhook_url=webhook_url,
-                allowed_updates=["message", "callback_query", "chat_member"],
                 drop_pending_updates=True
             )
-            logger.info(f"Webhook сервер запущен на порту {port}")
-            # Исправлено: idle() вызывается у application, а не у updater
-            await application.idle()
+            
+            # В режиме webhook используем бесконечный цикл для поддержания работы
+            stop_signal = asyncio.Event()
+            await stop_signal.wait()
             
         else:
             # Локальный запуск в режиме polling
-            # Отправка сообщения о запуске
-            if ANALYTICS_CHAT_ID:
-                try:
-                    await application.bot.send_message(
-                        chat_id=ANALYTICS_CHAT_ID,
-                        text="🚀 *Бот успешно запущен в режиме polling!*\n\n📅 Время запуска: " + datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                    logger.info("Отправлено сообщение о запуске бота")
-                except Exception as e:
-                    logger.error(f"Ошибка отправки сообщения о запуске: {e}")
-            
-            # Запуск в режиме polling
-            await application.bot.delete_webhook()  # Удаляем вебхук перед запуском polling
+            logger.info("Запуск в режиме polling")
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            await application.start()
             await application.updater.start_polling(drop_pending_updates=True)
-            # Исправлено: idle() вызывается у application, а не у updater
-            await application.idle()
+            await application.updater.idle()
             
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}", exc_info=True)
@@ -1214,9 +1224,25 @@ async def main():
     finally:
         # Корректное завершение работы
         try:
+            logger.info("Начинаю процесс завершения работы бота...")
+            if webhook_url:
+                try:
+                    await application.bot.delete_webhook()
+                    logger.info("Webhook успешно удален")
+                except Exception as e:
+                    logger.error(f"Ошибка при удалении webhook: {e}")
+            
+            if application.updater and application.updater.running:
+                await application.updater.stop()
+                logger.info("Updater остановлен")
+            
             if application.running:
                 await application.stop()
+                logger.info("Application остановлен")
+            
             await application.shutdown()
+            logger.info("Бот успешно завершил работу")
+            
         except Exception as e:
             logger.error(f"Ошибка при остановке бота: {e}", exc_info=True)
 
