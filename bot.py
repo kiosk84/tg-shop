@@ -1141,12 +1141,25 @@ def main():
     # Запускаем отправку сообщения о старте
     application.job_queue.run_once(send_startup_message, when=1)
 
-    # Запуск бота
-    application.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=["message", "callback_query"],
-        pool_timeout=30
-    )
+    # Определяем режим запуска (webhook для Render.com, polling для локальной разработки)
+    if os.getenv('RENDER'):
+        # Запуск в режиме webhook на Render.com
+        port = int(os.getenv('PORT', 3000))
+        application.run_webhook(
+            listen='0.0.0.0',
+            port=port,
+            url_path=TOKEN,
+            webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}",
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=True
+        )
+    else:
+        # Локальный запуск в режиме polling
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"],
+            pool_timeout=30
+        )
 
 if __name__ == '__main__':
     try:
