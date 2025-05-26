@@ -1100,6 +1100,20 @@ async def send_analytics(context: ContextTypes.DEFAULT_TYPE):
 ✅ Бот работает нормально
 👥 Всего пользователей: {len(users)}
 🔄 Режим: {"Webhook" if os.getenv('RENDER') else "Polling"}"""
+        
+        try:
+            await context.bot.send_message(
+                chat_id=ANALYTICS_CHAT_ID,
+                text=message_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            logger.info("Тестовое сообщение успешно отправлено")
+        except Exception as e:
+            logger.error(f"Ошибка отправки аналитики: {str(e)}")
+            return
+    except Exception as e:
+        logger.error(f"Ошибка при проверке чата: {str(e)}")
+        return
 
     try:
         await context.bot.send_message(
@@ -1109,6 +1123,8 @@ async def send_analytics(context: ContextTypes.DEFAULT_TYPE):
         )
         logger.info("Тестовое сообщение успешно отправлено")
     except Exception as e:
+        logger.error(f"Ошибка отправки аналитики: {str(e)}")
+        return
         logger.error(f"Ошибка отправки сообщения: {e}")
 
 async def get_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
