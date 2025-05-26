@@ -1145,64 +1145,84 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
 
-    await application.initialize()
-    await application.start()
-
-    # Настройка периодической отправки аналитики
-    job_queue = application.job_queue
-    job_queue.run_repeating(send_analytics, interval=300, first=10)
-
-    # Отправка сообщения о запуске бота
-    async def send_startup_message():
-        if ANALYTICS_CHAT_ID:
-            try:
-                await application.bot.send_message(
-                    chat_id=ANALYTICS_CHAT_ID,
-                    text="🚀 *Бот успешно запущен!*\n\n📅 Время запуска: " + datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                logger.info("Отправлено сообщение о запуске бота")
-            except Exception as e:
-                logger.error(f"Ошибка отправки сообщения о запуске: {e}")
-    
-    # Запускаем отправку сообщения о старте
-    await send_startup_message()
-
     # Определяем режим запуска (webhook для Render.com, polling для локальной разработки)
+    port = int(os.getenv('PORT', 3000))
+    webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}" if os.getenv('RENDER') else None
+
     try:
-        if os.getenv('RENDER'):
-            # Запуск в режиме webhook на Render.com
-            port = int(os.getenv('PORT', 3000))
-            webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}"
-            
-            # Принудительно устанавливаем webhook
+        if webhook_url:
+            # Настройка webhook
             await application.bot.set_webhook(url=webhook_url)
             logger.info(f"Webhook установлен на URL: {webhook_url}")
             
-            # Запускаем webhook сервер
-            async with application:
-                await application.start()
-                await application.updater.start_webhook(
-                    listen='0.0.0.0',
-                    port=port,
-                    url_path=TOKEN,
-                    webhook_url=webhook_url,
-                    allowed_updates=["message", "callback_query"],
-                    drop_pending_updates=True
-                )
-                await application.updater.start_webhook_server()
-                await application.idle()
+            # Запуск в режиме webhook
+            await application.initialize()
+            await application.start()
+            
+            # Настройка периодической отправки аналитики
+            job_queue = application.job_queue
+            job_queue.run_repeating(send_analytics, interval=300, first=10)
+            
+            # Отправка сообщения о запуске
+            if ANALYTICS_CHAT_ID:
+                try:
+                    await application.bot.send_message(
+                        chat_id=ANALYTICS_CHAT_ID,
+                        text="🚀 *Бот успешно запущен в режиме webhook!*\n\n📅 Время запуска: " + datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    logger.info("Отправлено сообщение о запуске бота")
+                except Exception as e:
+                    logger.error(f"Ошибка отправки сообщения о запуске: {e}")
+            
+            # Запуск webhook сервера
+            webhook_app = application.create_webhook_app(
+                listen='0.0.0.0',
+                port=port,
+                url_path=TOKEN,
+                webhook_url=webhook_url
+            )
+            await webhook_app.start()
+            logger.info(f"Webhook сервер запущен на порту {port}")
+            
+            # Ожидание сигнала завершения
+            await application.run_polling(drop_pending_updates=True)
+            
         else:
             # Локальный запуск в режиме polling
-            async with application:
-                await application.start()
-                await application.updater.start_polling(drop_pending_updates=True)
-                await application.idle()
+            await application.initialize()
+            await application.start()
+            
+            # Настройка периодической отправки аналитики
+            job_queue = application.job_queue
+            job_queue.run_repeating(send_analytics, interval=300, first=10)
+            
+            # Отправка сообщения о запуске
+            if ANALYTICS_CHAT_ID:
+                try:
+                    await application.bot.send_message(
+                        chat_id=ANALYTICS_CHAT_ID,
+                        text="🚀 *Бот успешно запущен в режиме polling!*\n\n📅 Время запуска: " + datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    logger.info("Отправлено сообщение о запуске бота")
+                except Exception as e:
+                    logger.error(f"Ошибка отправки сообщения о запуске: {e}")
+            
+            # Запуск polling
+            await application.run_polling(drop_pending_updates=True)
+            
+    except Exception as e:
+        logger.error(f"Ошибка при запуске бота: {e}", exc_info=True)
+        raise
     finally:
-        if application.updater.running:
-            await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+        # Корректное завершение работы
+        try:
+            if application.running:
+                await application.stop()
+            await application.shutdown()
+        except Exception as e:
+            logger.error(f"Ошибка при остановке бота: {e}", exc_info=True)
 
 if __name__ == '__main__':
     try:
