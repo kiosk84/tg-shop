@@ -1150,18 +1150,18 @@ async def main():
     webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}" if os.getenv('RENDER') else None
 
     try:
+        # Инициализация приложения
+        await application.initialize()
+        await application.start()
+        
+        # Настройка периодической отправки аналитики
+        job_queue = application.job_queue
+        job_queue.run_repeating(send_analytics, interval=300, first=10)
+
         if webhook_url:
-            # Настройка webhook
+            # Запуск в режиме webhook на Render.com
             await application.bot.set_webhook(url=webhook_url)
             logger.info(f"Webhook установлен на URL: {webhook_url}")
-            
-            # Запуск в режиме webhook
-            await application.initialize()
-            await application.start()
-            
-            # Настройка периодической отправки аналитики
-            job_queue = application.job_queue
-            job_queue.run_repeating(send_analytics, interval=300, first=10)
             
             # Отправка сообщения о запуске
             if ANALYTICS_CHAT_ID:
@@ -1175,28 +1175,20 @@ async def main():
                 except Exception as e:
                     logger.error(f"Ошибка отправки сообщения о запуске: {e}")
             
-            # Запуск webhook сервера
-            webhook_app = application.create_webhook_app(
+            # Запуск webhook сервера с правильной конфигурацией
+            await application.updater.start_webhook(
                 listen='0.0.0.0',
                 port=port,
                 url_path=TOKEN,
-                webhook_url=webhook_url
+                webhook_url=webhook_url,
+                allowed_updates=["message", "callback_query", "chat_member"],
+                drop_pending_updates=True
             )
-            await webhook_app.start()
             logger.info(f"Webhook сервер запущен на порту {port}")
-            
-            # Ожидание сигнала завершения
-            await application.run_polling(drop_pending_updates=True)
+            await application.updater.idle()
             
         else:
             # Локальный запуск в режиме polling
-            await application.initialize()
-            await application.start()
-            
-            # Настройка периодической отправки аналитики
-            job_queue = application.job_queue
-            job_queue.run_repeating(send_analytics, interval=300, first=10)
-            
             # Отправка сообщения о запуске
             if ANALYTICS_CHAT_ID:
                 try:
@@ -1209,8 +1201,10 @@ async def main():
                 except Exception as e:
                     logger.error(f"Ошибка отправки сообщения о запуске: {e}")
             
-            # Запуск polling
-            await application.run_polling(drop_pending_updates=True)
+            # Запуск в режиме polling
+            await application.bot.delete_webhook()  # Удаляем вебхук перед запуском polling
+            await application.updater.start_polling(drop_pending_updates=True)
+            await application.updater.idle()
             
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}", exc_info=True)
