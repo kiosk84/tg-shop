@@ -550,7 +550,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user['balance'] >= MIN_WITHDRAW:
             withdraw_buttons = [
                 [InlineKeyboardButton(f"💸 Вывести {MIN_WITHDRAW} ₽", callback_data=f'confirm_withdraw_{MIN_WITHDRAW}')],
-                [InlineKeyboardButton(f"💰 Вывести всё ({user['balance']} ₽)", callback_data=f'confirm_withdraw_{user["balance"]}')],
+                [InlineKeyboardButton(f"💰 Вывести всё ({user['balance']} ₽)", callback_data=f'confirm_withdraw_{user['balance']}')],
                 [InlineKeyboardButton("📋 История выводов", callback_data='history')],
                 [InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]
             ]
@@ -1194,7 +1194,11 @@ async def main():
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        import asyncio
+        if not asyncio.get_event_loop().is_running():
+            asyncio.run(main())
+        else:
+            asyncio.get_event_loop().create_task(main())
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем!")
     except Exception as e:
