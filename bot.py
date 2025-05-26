@@ -1176,14 +1176,22 @@ async def main():
         logger.info(f"Webhook установлен на URL: {webhook_url}")
         
         # Запускаем приложение в режиме webhook
-        application.run_webhook(
-            listen='0.0.0.0',
-            port=port,
-            url_path=TOKEN,
-            webhook_url=webhook_url,
-            allowed_updates=["message", "callback_query"],
-            drop_pending_updates=True
-        )
+        await application.initialize()
+        try:
+            await application.start()
+            await application.updater.start_webhook(
+                listen='0.0.0.0',
+                port=port,
+                url_path=TOKEN,
+                webhook_url=webhook_url,
+                allowed_updates=["message", "callback_query"],
+                drop_pending_updates=True
+            )
+            await application.updater.start_webhook_server()
+            await application.run_polling()
+        finally:
+            await application.stop()
+            await application.shutdown()
     else:
         # Локальный запуск в режиме polling
         application.run_polling(
@@ -1195,10 +1203,7 @@ async def main():
 if __name__ == '__main__':
     try:
         import asyncio
-        if not asyncio.get_event_loop().is_running():
-            asyncio.run(main())
-        else:
-            asyncio.get_event_loop().create_task(main())
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем!")
     except Exception as e:
