@@ -1142,7 +1142,11 @@ def main():
     application.job_queue.run_once(send_startup_message, when=1)
 
     # Запуск бота
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"],
+        pool_timeout=30
+    )
 
 if __name__ == '__main__':
     try:
