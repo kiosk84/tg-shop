@@ -1149,7 +1149,7 @@ def main():
             listen='0.0.0.0',
             port=port,
             url_path=TOKEN,
-            webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}",
+            webhook_url=f"{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}",
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True
         )
