@@ -1185,7 +1185,8 @@ async def main():
                 drop_pending_updates=True
             )
             logger.info(f"Webhook сервер запущен на порту {port}")
-            await application.updater.idle()
+            # Исправлено: idle() вызывается у application, а не у updater
+            await application.idle()
             
         else:
             # Локальный запуск в режиме polling
@@ -1204,7 +1205,8 @@ async def main():
             # Запуск в режиме polling
             await application.bot.delete_webhook()  # Удаляем вебхук перед запуском polling
             await application.updater.start_polling(drop_pending_updates=True)
-            await application.updater.idle()
+            # Исправлено: idle() вызывается у application, а не у updater
+            await application.idle()
             
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}", exc_info=True)
