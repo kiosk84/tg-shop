@@ -1086,12 +1086,20 @@ async def send_analytics(context: ContextTypes.DEFAULT_TYPE):
         logger.error("ANALYTICS_CHAT_ID не настроен")
         return
         
-    now = datetime.now()
-    message_text = f"""🤖 *Проверка работы бота*
+    try:
+        # Проверяем существование чата перед отправкой
+        chat = await context.bot.get_chat(ANALYTICS_CHAT_ID)
+        if not chat:
+            logger.error(f"Чат с ID {ANALYTICS_CHAT_ID} не найден")
+            return
+            
+        now = datetime.now()
+        message_text = f"""🤖 *Проверка работы бота*
 📅 {now.strftime('%d.%m.%Y %H:%M')}
 
 ✅ Бот работает нормально
-👥 Всего пользователей: {len(users)}"""
+👥 Всего пользователей: {len(users)}
+🔄 Режим: {"Webhook" if os.getenv('RENDER') else "Polling"}"""
 
     try:
         await context.bot.send_message(
@@ -1145,11 +1153,22 @@ def main():
     if os.getenv('RENDER'):
         # Запуск в режиме webhook на Render.com
         port = int(os.getenv('PORT', 3000))
+        webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}"
+        
+        # Принудительно устанавливаем webhook
+        async def set_webhook():
+            await application.bot.set_webhook(url=webhook_url)
+            logger.info(f"Webhook установлен на URL: {webhook_url}")
+        
+        # Вызываем установку вебхука
+        asyncio.run(set_webhook())
+        
+        # Запускаем приложение в режиме webhook
         application.run_webhook(
             listen='0.0.0.0',
             port=port,
             url_path=TOKEN,
-            webhook_url=f"{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}",
+            webhook_url=webhook_url,
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True
         )
