@@ -26,7 +26,7 @@ from handlers.withdraw import (
     notify_admins_withdrawal, 
     handle_payment_details
 )
-from handlers.investment import show_investments, handle_investment_request
+from handlers.investments import show_investments, handle_investment_request
 from handlers.referral import show_referral_program, handle_referral_bonus
 
 class BotLogger:
