@@ -1,12 +1,13 @@
 import os
 import logging
 from datetime import datetime
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, AsyncGenerator
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 from config import DATABASE_URL, DATABASE_BACKUP_DIR
 from models.user import Base, User, Referral, Investment, WithdrawalRequest
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -110,3 +111,17 @@ class Database:
             logger.info(f"База данных успешно сохранена в {backup_path}")
         except Exception as e:
             logger.error(f"Ошибка при создании резервной копии: {e}")
+
+    @asynccontextmanager
+    async def get_session() -> AsyncGenerator[Session, None]:
+        """Асинхронный контекстный менеджер для работы с сессией базы данных"""
+        db = Database()
+        session = db.SessionLocal()
+        try:
+            yield session
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise
+        finally:
+            session.close()
