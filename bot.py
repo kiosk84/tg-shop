@@ -1,5 +1,4 @@
 import logging
-import json
 import os
 import asyncio
 from datetime import datetime, timedelta
@@ -8,8 +7,23 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-# Импортируем все настройки из config
-from config import *
+# Импортируем настройки и утилиты
+from config.settings import *
+from utils.database import Database
+from utils.cron_server import CronServer
+from utils.helpers import format_currency
+from models.user import User, WithdrawalRequest, Investment
+
+# Импортируем обработчики
+from handlers.user import check_channel_subscription, show_channel_check
+from handlers.admin import handle_admin_command, handle_admin_message
+from handlers.withdraw import (
+    handle_withdraw_request, 
+    notify_admins_withdrawal, 
+    handle_payment_details
+)
+from handlers.investments import show_investments, handle_investment_request
+from handlers.referral import show_referral_program, handle_referral_bonus
 
 # 🎨 Настройка логирования
 logging.basicConfig(
@@ -22,48 +36,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 💾 Система сохранения данных
-def load_users_data():
-    """Загрузка данных пользователей из файла"""
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return {int(k): v for k, v in data.items()}
-        except (json.JSONDecodeError, ValueError):
-            logging.warning("Ошибка загрузки данных, создаем новый файл")
-    return {}
+# 💾 Инициализация базы данных и вспомогательных компонентов
+db = Database()
 
-def save_users_data():
-    """Сохранение данных пользователей в файл"""
-    try:
-        data_to_save = {str(k): v for k, v in users.items()}
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data_to_save, f, ensure_ascii=False, indent=2, default=str)
-    except Exception as e:
-        logging.error(f"Ошибка сохранения данных: {e}")
+async def handle_daily_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ежедневного бонуса"""
+    user_id = update.callback_query.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await update.callback_query.answer("❌ Пользователь не найден", show_alert=True)
+        return
+    
+    # Проверяем, прошли ли 24 часа с последнего бонуса
+    now = datetime.now()
+    if now - user.last_bonus < timedelta(days=1):
+        next_bonus = user.last_bonus + timedelta(days=1)
+        hours = int((next_bonus - now).total_seconds() / 3600)
+        minutes = int(((next_bonus - now).total_seconds() % 3600) / 60)
+        
+        await update.callback_query.answer(
+            f"⏳ Следующий бонус будет доступен через {hours} ч. {minutes} мин.",
+            show_alert=True
+        )
+        return
+    
+    # Начисляем бонус
+    user.balance += DAILY_BONUS
+    user.total_earned += DAILY_BONUS
+    user.last_bonus = now
+    db.session.commit()
+    
+    bonus_text = f"""🎁 *Ежедневный бонус получен!*
 
-def load_blocked_users():
-    """Загрузка списка заблокированных пользователей"""
-    if os.path.exists(BLOCKED_USERS_FILE):
-        try:
-            with open(BLOCKED_USERS_FILE, 'r', encoding='utf-8') as f:
-                return set(json.load(f))
-        except (json.JSONDecodeError, ValueError):
-            logging.warning("Ошибка загрузки заблокированных пользователей")
-    return set()
+💰 Сумма: *{format_currency(DAILY_BONUS)}*
+💵 Баланс: *{format_currency(user.balance)}*
 
-def save_blocked_users():
-    """Сохранение списка заблокированных пользователей"""
-    try:
-        with open(BLOCKED_USERS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(list(blocked_users), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logging.error(f"Ошибка сохранения заблокированных пользователей: {e}")
+⏰ Следующий бонус будет доступен через 24 часа"""
 
-# 📊 Загрузка данных при запуске
-users = load_users_data()
-blocked_users = load_blocked_users()
+    keyboard = [[InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]]
+    
+    await update.callback_query.edit_message_text(
+        bonus_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 # 🛡️ Проверка на админа
 def is_admin(user_id: int) -> bool:
@@ -73,147 +90,67 @@ def is_admin(user_id: int) -> bool:
 # 🚫 Проверка на блокировку
 def is_blocked(user_id: int) -> bool:
     """Проверка заблокирован ли пользователь"""
-    return user_id in blocked_users
-
-# 🔍 Проверка подписки на канал
-async def check_channel_subscription(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    """Проверка подписки пользователя на канал"""
-    try:
-        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        return member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]
-    except TelegramError as e:
-        logger.error(f"Ошибка проверки подписки для пользователя {user_id}: {e}")
-        return False
+    user = db.get_user(user_id)
+    return user and user.is_blocked if user else False
 
 # 🎯 Функция создания пользователя
-def create_user(user_id: int, ref_id: int = None):
+async def create_user(user_id: int, ref_id: int = None):
     """Создание нового пользователя с реферальной системой"""
-    users[user_id] = {
-        'balance': 0,
-        'referrals': [],
-        'last_bonus': datetime.min.isoformat(),
-        'total_earned': 0,
-        'withdrawals': 0,
-        'join_date': datetime.now().isoformat(),
-        'channel_joined': False
-    }
+    # Создаем нового пользователя
+    user = db.create_user(user_id)
     
     # Обработка реферальной ссылки
-    if ref_id and ref_id != user_id and ref_id in users:
-        if user_id not in users[ref_id]['referrals']:
-            users[ref_id]['balance'] += REFERRAL_BONUS
-            users[ref_id]['total_earned'] += REFERRAL_BONUS
-            users[ref_id]['referrals'].append(user_id)
+    if ref_id and ref_id != user_id:
+        referrer = db.get_user(ref_id)
+        if referrer and not db.get_referral(ref_id, user_id):
+            # Создаем реферальную связь
+            db.create_referral(ref_id, user_id)
+            # Начисляем бонус рефереру
+            referrer.balance += REFERRAL_BONUS
+            referrer.total_earned += REFERRAL_BONUS
+            db.session.commit()
             logger.info(f"Пользователь {user_id} присоединился по реферальной ссылке {ref_id}")
     
-    save_users_data()
-
-# 📢 Экран проверки подписки
-async def show_channel_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать экран проверки подписки на канал"""
-    user_name = update.effective_user.first_name or "Друг"
-    
-    channel_text = f"""🔒 *Доступ ограничен*
-
-👋 Привет, {user_name}!
-
-📢 Для использования бота необходимо подписаться на наш канал:
-
-🎯 *{CHANNEL_NAME}*
-
-💎 В канале вы найдете:
-• 🚀 Эксклюзивные промокоды
-• 💰 Дополнительные способы заработка
-• 📈 Актуальные новости проекта
-• 🎁 Специальные бонусы для подписчиков
-
-👇 Подпишитесь и нажмите "Проверить подписку"""
-    
-    keyboard = [
-        [InlineKeyboardButton("📢 Подписаться на канал", url=CHANNEL_LINK)],
-        [InlineKeyboardButton("✅ Проверить подписку", callback_data='check_subscription')]
-    ]
-    
-    if update.message:
-        await update.message.reply_text(
-            channel_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    elif update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(
-                channel_text,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN
-            )
-        except TelegramError:
-            await update.callback_query.answer("Проверьте подписку на канал")
-
-# 🔍 Обработка проверки подписки
-async def handle_subscription_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка проверки подписки на канал"""
-    query = update.callback_query
-    user_id = query.from_user.id
-
-    # Проверка на блокировку
-    if is_blocked(user_id):
-        await query.answer("❌ Вы заблокированы в боте", show_alert=True)
-        return
-
-    is_subscribed = await check_channel_subscription(context, user_id)
-
-    if is_subscribed:
-        if user_id in users:
-            users[user_id]['channel_joined'] = True
-            save_users_data()
-
-        await query.answer("✅ Отлично! Подписка подтверждена!", show_alert=True)
-        await start(update, context)
-    else:
-        await query.answer("❌ Подписка не найдена. Пожалуйста, подпишитесь на канал.", show_alert=True)
-        await show_channel_check(update, context)
+    return user
 
 # 👑 Админ панель
 async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать админ панель"""
-    admin_text = """👑 *АДМИН ПАНЕЛЬ*
-
-🎛️ Доступные функции:
-
-👥 Управление пользователями:
-• Просмотр статистики
-• Блокировка/разблокировка
-• Поиск пользователей
-
-📢 Рассылка:
-• Отправка сообщений всем
-• Отправка конкретному пользователю
-
-📊 Аналитика:
-• Общая статистика бота
-• Топ пользователей
-• Финансовая статистика"""
+    query = update.callback_query
+    user_id = query.from_user.id
     
+    if not is_admin(user_id):
+        await query.answer("❌ Недостаточно прав", show_alert=True)
+        return
+
+    stats = db.get_user_statistics()
+    stats_text = f"""👑 *АДМИН-ПАНЕЛЬ*
+
+📊 *Статистика:*
+👥 Всего пользователей: *{stats['total_users']}*
+✅ Активных: *{stats['active_users']}*
+🚫 Заблокировано: *{stats['blocked_users']}*
+
+📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
+
     keyboard = [
-        [InlineKeyboardButton("📊 Статистика бота", callback_data='admin_stats'),
-         InlineKeyboardButton("👥 Управление", callback_data='admin_users')],
-        [InlineKeyboardButton("📢 Рассылка всем", callback_data='admin_broadcast'),
-         InlineKeyboardButton("💬 Отправить пользователю", callback_data='admin_send_user')],
-        [InlineKeyboardButton("🚫 Заблокировать", callback_data='admin_block'),
-         InlineKeyboardButton("✅ Разблокировать", callback_data='admin_unblock')],
+        [InlineKeyboardButton("📊 Подробная статистика", callback_data='admin_stats'),
+         InlineKeyboardButton("📢 Рассылка", callback_data='admin_broadcast')],
+        [InlineKeyboardButton("✉️ Написать пользователю", callback_data='admin_send_user'),
+         InlineKeyboardButton("🚫 Заблокировать", callback_data='admin_block')],
+        [InlineKeyboardButton("✅ Разблокировать", callback_data='admin_unblock')],
         [InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]
     ]
-    
-    if update.message:
-        await update.message.reply_text(
-            admin_text,
+
+    if update.callback_query:
+        await query.edit_message_text(
+            stats_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
     else:
-        await update.callback_query.edit_message_text(
-            admin_text,
+        await update.message.reply_text(
+            stats_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
@@ -241,10 +178,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(blocked_text, parse_mode=ParseMode.MARKDOWN)
         return
     
-    # Создание пользователя если его нет
-    if user_id not in users:
+    # Получаем или создаем пользователя
+    user = db.get_user(user_id)
+    if not user:
         ref_id = int(ref) if ref and ref.isdigit() else None
-        create_user(user_id, ref_id)
+        user = await create_user(user_id, ref_id)
     
     # Проверка подписки на канал (админы проходят без проверки)
     if not is_admin(user_id):
@@ -254,56 +192,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     
     # Обновляем статус подписки
-    users[user_id]['channel_joined'] = True
-    save_users_data()
+    if not user.channel_joined:
+        user.channel_joined = True
+        db.session.commit()
     
     # 🎨 Клавиатура для обычных пользователей
     keyboard = [
-        [InlineKeyboardButton("💰 Мой баланс", callback_data='balance'),
+        [InlineKeyboardButton("💰 Баланс", callback_data='balance'),
          InlineKeyboardButton("📊 Статистика", callback_data='stats')],
-        [InlineKeyboardButton("🎁 Ежедневный бонус", callback_data='bonus'),
-         InlineKeyboardButton("👥 Пригласить друзей", callback_data='referral')],
-        [InlineKeyboardButton("💸 Вывести средства", callback_data='withdraw'),
-         InlineKeyboardButton("ℹ️ Как заработать", callback_data='info')],
-        [InlineKeyboardButton("🏆 Топ пользователей", callback_data='top'),
-         InlineKeyboardButton("📢 Наш канал", url=CHANNEL_LINK)]
+        [InlineKeyboardButton("💸 Вывод", callback_data='withdraw'),
+         InlineKeyboardButton("🎁 Бонус", callback_data='bonus')],
+        [InlineKeyboardButton("📈 Инвестиции", callback_data='investments'),
+         InlineKeyboardButton("👥 Рефералы", callback_data='referral')],
+        [InlineKeyboardButton("🏆 Топ", callback_data='top'),
+         InlineKeyboardButton("ℹ️ Информация", callback_data='info')]
     ]
     
-    # Добавляем админ кнопку для админов
+    # Добавляем кнопку админ-панели для администраторов
     if is_admin(user_id):
-        keyboard.append([InlineKeyboardButton("👑 АДМИН ПАНЕЛЬ", callback_data='admin_panel')])
+        keyboard.append([InlineKeyboardButton("👑 Админ панель", callback_data='admin_panel')])
     
-    welcome_text = f"""🌟 *Добро пожаловать, {user_name}!*
+    welcome_text = f"""👋 Привет, {user_name}!
 
-💎 Вы в самом крутом заработок-боте Telegram!
+💰 Баланс: *{format_currency(user.balance)}*
+📈 Всего заработано: *{format_currency(user.total_earned)}*
+💸 Выведено: *{format_currency(user.withdrawals)}*
+👥 Рефералов: *{len(user.referrals)}*
 
-🚀 *Что вас ждет:*
-• 💰 Зарабатывайте приглашая друзей
-• 🎁 Получайте ежедневные бонусы
-• 💸 Выводите реальные деньги
-• 🏆 Участвуйте в рейтинге
+🔥 Выберите действие:"""
 
-✨ Начните зарабатывать прямо сейчас!"""
-    
-    if update.message:
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            welcome_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
         await update.message.reply_text(
             welcome_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
-    elif update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(
-                welcome_text,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN
-            )
-        except TelegramError:
-            await update.callback_query.message.reply_text(
-                welcome_text,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN
-            )
 
 # 🎯 Обработка кнопок
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -317,86 +246,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Проверка существования пользователя
-    if user_id not in users:
+    user = db.get_user(user_id)
+    if not user:
         await query.edit_message_text(
             "❌ Пожалуйста, начните сначала с команды /start",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔄 Перезапустить", callback_data='menu')
             ]])
-        )
-        return
-    
-    # Админ функции
-    if query.data == 'admin_panel' and is_admin(user_id):
-        await show_admin_panel(update, context)
-        return
-    
-    elif query.data == 'admin_stats' and is_admin(user_id):
-        total_users = len(users)
-        total_balance = sum(user.get('balance', 0) for user in users.values())
-        total_earned = sum(user.get('total_earned', 0) for user in users.values())
-        total_withdrawals = sum(user.get('withdrawals', 0) for user in users.values())
-        blocked_count = len(blocked_users)
-        
-        stats_text = f"""📊 *СТАТИСТИКА БОТА*
-
-👥 Всего пользователей: *{total_users}*
-🚫 Заблокировано: *{blocked_count}*
-💰 Общий баланс: *{total_balance} ₽*
-📈 Всего заработано: *{total_earned} ₽*
-💸 Всего выведено: *{total_withdrawals} ₽*
-
-📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
-        
-        back_button = [[InlineKeyboardButton("⬅️ Админ панель", callback_data='admin_panel')]]
-        await query.edit_message_text(
-            stats_text,
-            reply_markup=InlineKeyboardMarkup(back_button),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    elif query.data == 'admin_broadcast' and is_admin(user_id):
-        context.user_data['waiting_for'] = 'broadcast_message'
-        await query.edit_message_text(
-            "📢 *РАССЫЛКА СООБЩЕНИЯ*\n\nОтправьте сообщение, которое хотите разослать всем пользователям:",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Отмена", callback_data='admin_panel')
-            ]]),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    elif query.data == 'admin_send_user' and is_admin(user_id):
-        context.user_data['waiting_for'] = 'user_id_for_message'
-        await query.edit_message_text(
-            "💬 *ОТПРАВКА ПОЛЬЗОВАТЕЛЮ*\n\nВведите ID пользователя:",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Отмена", callback_data='admin_panel')
-            ]]),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    elif query.data == 'admin_block' and is_admin(user_id):
-        context.user_data['waiting_for'] = 'user_id_to_block'
-        await query.edit_message_text(
-            "🚫 *БЛОКИРОВКА ПОЛЬЗОВАТЕЛЯ*\n\nВведите ID пользователя для блокировки:",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Отмена", callback_data='admin_panel')
-            ]]),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    elif query.data == 'admin_unblock' and is_admin(user_id):
-        context.user_data['waiting_for'] = 'user_id_to_unblock'
-        await query.edit_message_text(
-            "✅ *РАЗБЛОКИРОВКА ПОЛЬЗОВАТЕЛЯ*\n\nВведите ID пользователя для разблокировки:",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Отмена", callback_data='admin_panel')
-            ]]),
-            parse_mode=ParseMode.MARKDOWN
         )
         return
     
@@ -407,207 +263,102 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_channel_check(update, context)
             return
     
-    user = users[user_id]
-    back_button = [[InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]]
+    # Админ функции
+    if query.data == 'admin_panel' and is_admin(user_id):
+        await show_admin_panel(update, context)
+        return
     
-    if query.data == 'balance':
-        balance_text = f"""💰 *Ваш баланс*
-
-💵 Текущий баланс: *{user['balance']} ₽*
-📈 Всего заработано: *{user.get('total_earned', 0)} ₽*
-💸 Выведено: *{user.get('withdrawals', 0)} ₽*
-👥 Приглашено друзей: *{len(user['referrals'])}*
-
-📅 Дата регистрации: {datetime.fromisoformat(user.get('join_date', datetime.now().isoformat())).strftime('%d.%m.%Y')}"""
+    elif query.data == 'admin_stats' and is_admin(user_id):
+        stats = db.get_user_statistics()
+        invest_stats = db.get_investments_statistics()
         
+        stats_text = f"""📊 *ПОДРОБНАЯ СТАТИСТИКА*
+
+👥 *Пользователи:*
+• Всего: *{stats['total_users']}*
+• Активных: *{stats['active_users']}*
+• Заблокировано: *{stats['blocked_users']}*
+
+💰 *Финансы:*
+• Инвестировано: *{format_currency(invest_stats['total_investments'])}*
+• Выплачено: *{format_currency(invest_stats['total_profit_paid'])}*
+• Активных планов: *{invest_stats['active_investments']}*
+
+📅 Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
+
+        keyboard = [[InlineKeyboardButton("⬅️ Админ панель", callback_data='admin_panel')]]
         await query.edit_message_text(
-            balance_text,
-            reply_markup=InlineKeyboardMarkup(back_button),
+            stats_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
+        return
     
+    # Пользовательские функции
     elif query.data == 'stats':
-        join_date = datetime.fromisoformat(user.get('join_date', datetime.now().isoformat()))
-        days_active = (datetime.now() - join_date).days + 1
-        avg_daily = round(user.get('total_earned', 0) / days_active, 2) if days_active > 0 else 0
+        ref_count = len(user.referrals)
+        ref_earnings = sum(r.bonus_paid for r in user.referrals)
+        invest_earnings = sum(i.total_profit for i in user.investments)
         
         stats_text = f"""📊 *Ваша статистика*
 
-🎯 Дней в боте: *{days_active}*
-📈 Средний доход в день: *{avg_daily} ₽*
-👥 Активных рефералов: *{len(user['referrals'])}*
-🎁 Последний бонус: {datetime.fromisoformat(user['last_bonus']).strftime('%d.%m.%Y') if user['last_bonus'] != datetime.min.isoformat() else 'Не получен'}
-📢 Подписка на канал: {'✅ Активна' if user.get('channel_joined', False) else '❌ Неактивна'}
+💰 *Баланс и доход:*
+• Текущий баланс: *{format_currency(user.balance)}*
+• Всего заработано: *{format_currency(user.total_earned)}*
+• Выведено: *{format_currency(user.withdrawals)}*
 
-🏆 Ваш уровень: {'🥇 VIP' if user['balance'] >= 100 else '🥈 Активный' if user['balance'] >= 50 else '🥉 Новичок'}"""
-        
+👥 *Рефералы:*
+• Всего рефералов: *{ref_count}*
+• Заработок с рефералов: *{format_currency(ref_earnings)}*
+
+📈 *Инвестиции:*
+• Активных планов: *{len(user.investments)}*
+• Прибыль с инвестиций: *{format_currency(invest_earnings)}*
+
+📅 Дата регистрации: {user.join_date.strftime('%d.%m.%Y %H:%M')}"""
+
+        keyboard = [[InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]]
         await query.edit_message_text(
             stats_text,
-            reply_markup=InlineKeyboardMarkup(back_button),
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
+        return
     
-    elif query.data == 'bonus':
-        now = datetime.now()
-        last_bonus = datetime.fromisoformat(user['last_bonus']) if user['last_bonus'] != datetime.min.isoformat() else datetime.min
-        
-        if now - last_bonus >= timedelta(days=1):
-            user['balance'] += DAILY_BONUS
-            user['total_earned'] = user.get('total_earned', 0) + DAILY_BONUS
-            user['last_bonus'] = now.isoformat()
-            save_users_data()
-            
-            bonus_text = f"""🎉 *Поздравляем!*
-
-✨ Вы получили ежедневный бонус!
-💰 +{DAILY_BONUS} ₽ добавлено на баланс
-
-💵 Текущий баланс: *{user['balance']} ₽*
-
-🔥 Приходите завтра за новым бонусом!"""
-        else:
-            remaining = timedelta(days=1) - (now - last_bonus)
-            hours = remaining.seconds // 3600
-            minutes = (remaining.seconds // 60) % 60
-            
-            bonus_text = f"""⏰ *Ежедневный бонус*
-
-⏳ Следующий бонус будет доступен через:
-🕐 *{hours} ч. {minutes} мин.*
-
-💡 *Совет:* Пока ждете, пригласите друзей и получите по {REFERRAL_BONUS} ₽ за каждого!"""
-        
-        await query.edit_message_text(
-            bonus_text,
-            reply_markup=InlineKeyboardMarkup(back_button),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    elif query.data == 'referral':
-        username = context.bot.username
-        ref_link = f"https://t.me/{username}?start={user_id}"
-        
-        referral_text = f"""👥 *Реферальная программа*
-
-💰 Зарабатывайте *{REFERRAL_BONUS} ₽* за каждого друга!
-
-🔗 *Ваша реферальная ссылка:*
-`{ref_link}`
-
-📊 *Ваши результаты:*
-👥 Приглашено: *{len(user['referrals'])}* друзей
-💰 Заработано с рефералов: *{len(user['referrals']) * REFERRAL_BONUS} ₽*
-
-🚀 *Как это работает:*
-1️⃣ Отправьте ссылку друзьям
-2️⃣ Они переходят и запускают бота
-3️⃣ Вы получаете {REFERRAL_BONUS} ₽ мгновенно!
-
-💡 *Важно:* Друзья должны подписаться на канал!"""
-        
-        share_button = [
-            [InlineKeyboardButton("📤 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=🚀 Присоединяйся к крутому заработок-боту! Зарабатывай деньги легко и быстро!")],
-            [InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]
-        ]
-        
-        await query.edit_message_text(
-            referral_text,
-            reply_markup=InlineKeyboardMarkup(share_button),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
+    # Обработка других команд
     elif query.data == 'withdraw':
-        # Формируем текст со статистикой
-        total_earned = user.get('total_earned', 0)
-        total_withdrawn = user.get('withdrawals', 0)
-        pending_withdrawals = sum(
-            w['amount'] 
-            for w in user.get('withdrawals_history', []) 
-            if w['status'] == 'pending'
-        )
-        
-        withdraw_buttons = []
-        if user['balance'] >= MIN_WITHDRAW:
-            withdraw_buttons = [
-                [InlineKeyboardButton(f"💸 Вывести {MIN_WITHDRAW} ₽", callback_data=f"confirm_withdraw_{MIN_WITHDRAW}")],
-                [InlineKeyboardButton(f"💰 Вывести всё ({user['balance']} ₽)", callback_data=f"confirm_withdraw_{user['balance']}")],
-                [InlineKeyboardButton("📋 История выводов", callback_data='history')],
-                [InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]
-            ]
-            
-            withdraw_text = f"""💸 *Вывод средств*
-
-📊 *Ваша статистика:*
-💰 Баланс: *{user['balance']} ₽*
-📈 Всего заработано: *{total_earned} ₽*
-💸 Выведено: *{total_withdrawn} ₽*
-⏳ В обработке: *{pending_withdrawals} ₽*
-
-ℹ️ Минимальная сумма: *{MIN_WITHDRAW} ₽*
-⚡️ Срок обработки: до 24 часов
-🔒 Транзакции защищены
-
-💡 Выберите сумму для вывода:"""
-        else:
-            needed = MIN_WITHDRAW - user['balance']
-            withdraw_buttons = [
-                [InlineKeyboardButton("👥 Пригласить друзей", callback_data='referral')],
-                [InlineKeyboardButton("🎁 Получить бонус", callback_data='bonus')],
-                [InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]
-            ]
-            withdraw_text = f"""❌ *Недостаточно средств*
-
-💰 Ваш баланс: *{user['balance']} ₽*
-💳 Минимум для вывода: *{MIN_WITHDRAW} ₽*
-📉 Не хватает: *{needed} ₽*
-
-🚀 *Как быстро заработать:*
-• 👥 Пригласите {max(1, needed // REFERRAL_BONUS)} друзей (+{REFERRAL_BONUS} ₽ за каждого)
-• 🎁 Получите ежедневный бонус (+{DAILY_BONUS} ₽)
-• 📢 Следите за обновлениями в канале"""
-        
-        await query.edit_message_text(
-            withdraw_text,
-            reply_markup=InlineKeyboardMarkup(withdraw_buttons),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    # Обработка подтверждения вывода
-    elif query.data.startswith('confirm_withdraw_'):
-        amount = int(query.data.split('_')[-1])
-        await handle_withdraw_request(update, context, amount)
-    
-    # Обработка выбора платежной системы
-    elif query.data.startswith('payment_'):
-        await handle_payment_method(update, context)
-    
-    # Обработка действий с заявками на вывод
-    elif query.data.startswith(('approve_', 'reject_')):
-        await handle_withdrawal_action(update, context)
-    
+        await handle_withdraw_request(update, context)
+    elif query.data == 'bonus':
+        await handle_daily_bonus(update, context)
+    elif query.data == 'investments':
+        await show_investments(update, context)
+    elif query.data == 'referral':
+        await show_referral_program(update, context)
     elif query.data == 'top':
         await show_top_users(update, context)
-    
     elif query.data == 'info':
         await show_info(update, context)
-    
     elif query.data == 'history':
         await show_withdrawal_history(update, context)
-    
     elif query.data == 'menu':
         await start(update, context)
+    # Более специфичные обработчики могут быть добавлены здесь
 
 async def handle_withdraw_request(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
     """Обработка запроса на вывод средств"""
     query = update.callback_query
     user_id = query.from_user.id
-    user = users[user_id]
+    user = db.get_user(user_id)
+    
+    if not user:
+        await query.answer("❌ Пользователь не найден", show_alert=True)
+        return
     
     if amount < MIN_WITHDRAW:
         await query.answer(f"❌ Минимальная сумма вывода {MIN_WITHDRAW} ₽", show_alert=True)
         return
     
-    if amount > user['balance']:
+    if amount > user.balance:
         await query.answer("❌ Недостаточно средств на балансе", show_alert=True)
         return
     
@@ -620,7 +371,7 @@ async def handle_withdraw_request(update: Update, context: ContextTypes.DEFAULT_
     
     payment_text = f"""💳 *Выберите способ вывода*
 
-💰 Сумма: *{amount} ₽*
+💰 Сумма: *{format_currency(amount)}*
 ⚡ Время обработки: до 24 часов
 🔒 Транзакция защищена"""
 
@@ -634,19 +385,23 @@ async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TY
     """Обработка выбора платежной системы"""
     query = update.callback_query
     user_id = query.from_user.id
-    user = users[user_id]
+    user = db.get_user(user_id)
+    
+    if not user:
+        await query.answer("❌ Пользователь не найден", show_alert=True)
+        return
     
     # Получаем метод и сумму из callback_data
     _, method, amount = query.data.split('_')
     amount = int(amount)
     
     # Проверяем баланс еще раз
-    if amount > user['balance']:
+    if amount > user.balance:
         await query.answer("❌ Недостаточно средств на балансе", show_alert=True)
         return
     
     if amount < MIN_WITHDRAW:
-        await query.answer(f"❌ Минимальная сумма вывода {MIN_WITHDRAW} ₽", show_alert=True)
+        await query.answer(f"❌ Минимальная сумма вывода {format_currency(MIN_WITHDRAW)}", show_alert=True)
         return
     
     # Сохраняем данные для следующего шага
@@ -659,7 +414,7 @@ async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(
         f"""💳 *Ввод реквизитов*
 
-💰 Сумма: *{amount} ₽*
+💰 Сумма: *{format_currency(amount)}*
 💳 Система: *{method.upper()}*
 
 ✏️ Отправьте реквизиты для вывода средств:""",
@@ -683,71 +438,77 @@ async def handle_withdrawal_action(update: Update, context: ContextTypes.DEFAULT
         
     try:
         action, withdrawal_id = query.data.split('_')
-    except ValueError:
+        withdrawal_id = int(withdrawal_id)
+    except (ValueError, TypeError):
         await query.answer("❌ Неверный формат данных", show_alert=True)
         return
     
-    action, withdrawal_id = query.data.split('_')
-    
-    # Поиск заявки
-    withdrawal = None
-    withdrawal_user = None
-    for u_id, user_data in users.items():
-        if 'withdrawals_history' in user_data:
-            for w in user_data['withdrawals_history']:
-                if w['id'] == withdrawal_id:
-                    withdrawal = w
-                    withdrawal_user = u_id
-                    break
-            if withdrawal:
-                break
-    
+    # Получаем заявку
+    withdrawal = db.session.query(WithdrawalRequest).get(withdrawal_id)
     if not withdrawal:
         await query.answer("❌ Заявка не найдена", show_alert=True)
         return
     
-    if action == 'approve':
-        withdrawal['status'] = 'approved'
-        await notify_withdrawal_status(context, withdrawal_user, withdrawal, True)
-    else:
-        withdrawal['status'] = 'rejected'
-        # Возвращаем средства
-        users[withdrawal_user]['balance'] += withdrawal['amount']
-        await notify_withdrawal_status(context, withdrawal_user, withdrawal, False)
+    # Получаем пользователя
+    withdrawal_user = withdrawal.user
+    if not withdrawal_user:
+        await query.answer("❌ Пользователь не найден", show_alert=True)
+        return
     
-    save_users_data()
+    if action == 'approve':
+        withdrawal.status = 'approved'
+        withdrawal.processed_date = datetime.now()
+        withdrawal.processed_by = user_id
+        withdrawal_user.withdrawals += withdrawal.amount
+        db.session.commit()
+        await notify_withdrawal_status(context, withdrawal_user.user_id, withdrawal, True)
+    else:
+        withdrawal.status = 'rejected'
+        withdrawal.processed_date = datetime.now()
+        withdrawal.processed_by = user_id
+        # Возвращаем средства
+        withdrawal_user.balance += withdrawal.amount
+        db.session.commit()
+        await notify_withdrawal_status(context, withdrawal_user.user_id, withdrawal, False)
+    
     await query.answer("✅ Статус заявки обновлен", show_alert=True)
 
-async def notify_withdrawal_status(context: ContextTypes.DEFAULT_TYPE, user_id: int, withdrawal: dict, approved: bool):
+async def notify_withdrawal_status(context: ContextTypes.DEFAULT_TYPE, user_id: int, withdrawal: WithdrawalRequest, approved: bool):
     """Уведомление пользователя о статусе вывода"""
     if approved:
         text = f"""✅ *Заявка на вывод одобрена!*
 
-💰 Сумма: *{withdrawal['amount']} ₽*
-💳 Метод: *{withdrawal['method'].upper()}*
-🆔 Номер заявки: `{withdrawal['id']}`
+💰 Сумма: *{format_currency(withdrawal.amount)}*
+💳 Метод: *{withdrawal.method.upper()}*
+🆔 Номер заявки: `{withdrawal.id}`
 
 ⚡️ Средства поступят в течение 24 часов"""
     else:
         text = f"""❌ *Заявка на вывод отклонена*
 
-💰 Сумма: *{withdrawal['amount']} ₽*
-💳 Метод: *{withdrawal['method'].upper()}*
-🆔 Номер заявки: `{withdrawal['id']}`
+💰 Сумма: *{format_currency(withdrawal.amount)}*
+💳 Метод: *{withdrawal.method.upper()}*
+🆔 Номер заявки: `{withdrawal.id}`
 
 💵 Средства возвращены на баланс
-📞 По всем вопросам обращайтесь в поддержку"""
+⚡️ Вы можете создать новую заявку"""
+
+    keyboard = [
+        [InlineKeyboardButton("📋 История выводов", callback_data='history')],
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]
+    ]
 
     try:
         await context.bot.send_message(
-            user_id,
-            text,
+            chat_id=user_id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
-    except TelegramError:
-        logger.error(f"Не удалось отправить уведомление пользователю {user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
 
-async def notify_admins_about_withdrawal(context: ContextTypes.DEFAULT_TYPE, user_id: int, withdrawal: dict):
+async def notify_admins_about_withdrawal(context: ContextTypes.DEFAULT_TYPE, user_id: int, withdrawal: WithdrawalRequest):
     """Отправка уведомления админам о новой заявке на вывод"""
     try:
         user = await context.bot.get_chat(user_id)
@@ -755,23 +516,28 @@ async def notify_admins_about_withdrawal(context: ContextTypes.DEFAULT_TYPE, use
     except:
         user_mention = f"User ID: `{user_id}`"
     
+    db_user = db.get_user(user_id)
+    if not db_user:
+        logger.error(f"Пользователь {user_id} не найден в базе")
+        return
+    
     admin_message = f"""💰 *НОВАЯ ЗАЯВКА НА ВЫВОД*
 
 👤 Пользователь: {user_mention}
-💵 Сумма: *{withdrawal['amount']} ₽*
-💳 Способ: *{withdrawal['method'].upper()}*
-📝 Реквизиты: `{withdrawal['details']}`
-🆔 Номер заявки: `{withdrawal['id']}`
-📅 Дата: {datetime.fromisoformat(withdrawal['date']).strftime('%d.%m.%Y %H:%M')}
+💵 Сумма: *{format_currency(withdrawal.amount)}*
+💳 Способ: *{withdrawal.method.upper()}*
+📝 Реквизиты: `{withdrawal.details}`
+🆔 Номер заявки: `{withdrawal.id}`
+📅 Дата: {withdrawal.date.strftime('%d.%m.%Y %H:%M')}
 
 📊 Статистика пользователя:
-• Баланс: *{users[user_id]['balance']} ₽*
-• Всего заработано: *{users[user_id].get('total_earned', 0)} ₽*
-• Рефералов: *{len(users[user_id]['referrals'])}*"""
+• Баланс: *{format_currency(db_user.balance)}*
+• Всего заработано: *{format_currency(db_user.total_earned)}*
+• Рефералов: *{len(db_user.referrals)}*"""
 
     keyboard = [[
-        InlineKeyboardButton("✅ Подтвердить", callback_data=f"approve_{withdrawal['id']}"),
-        InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{withdrawal['id']}")
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"approve_{withdrawal.id}"),
+        InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{withdrawal.id}")
     ]]
 
     for admin_id in ADMIN_IDS:
@@ -787,29 +553,27 @@ async def notify_admins_about_withdrawal(context: ContextTypes.DEFAULT_TYPE, use
 
 async def show_top_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать топ пользователей"""
-    # Сортируем пользователей по заработку
-    sorted_users = sorted(
-        users.items(),
-        key=lambda x: (x[1].get('total_earned', 0), x[1].get('balance', 0)),
-        reverse=True
-    )[:10]
+    # Получаем топ-10 пользователей по заработку
+    top_users = db.session.query(User)\
+        .order_by(User.total_earned.desc(), User.balance.desc())\
+        .limit(10)\
+        .all()
     
     top_text = "🏆 *ТОП-10 ПОЛЬЗОВАТЕЛЕЙ*\n\n"
     
-    for i, (user_id, user_data) in enumerate(sorted_users, 1):
+    for i, user in enumerate(top_users, 1):
         try:
-            user = await context.bot.get_chat(user_id)
-            name = user.first_name
+            chat = await context.bot.get_chat(user.user_id)
+            name = chat.first_name
         except:
-            name = f"Пользователь {user_id}"
+            name = f"Пользователь {user.user_id}"
         
-        earned = user_data.get('total_earned', 0)
-        refs = len(user_data.get('referrals', []))
-        
+        refs_count = len(user.referrals)
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+        
         top_text += f"{medal} {name}\n"
-        top_text += f"💰 Заработано: *{earned} ₽*\n"
-        top_text += f"👥 Рефералов: *{refs}*\n\n"
+        top_text += f"💰 Заработано: *{format_currency(user.total_earned)}*\n"
+        top_text += f"👥 Рефералов: *{refs_count}*\n\n"
     
     keyboard = [[InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]]
     
@@ -875,31 +639,29 @@ async def show_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_withdrawal_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать историю выводов"""
     user_id = update.effective_user.id
-    user = users[user_id]
+    user = db.get_user(user_id)
+    withdrawals = db.session.query(WithdrawalRequest).filter_by(user_id=user.id).order_by(WithdrawalRequest.date.desc()).all()
     
-    if 'withdrawals_history' not in user or not user['withdrawals_history']:
+    if not withdrawals:
         history_text = """📋 *История выводов*
 
 ❌ У вас пока нет заявок на вывод средств"""
     else:
         history_text = "📋 *История выводов*\n\n"
-        for w in reversed(user['withdrawals_history']):
+        for w in withdrawals:
             status = {
                 'pending': '⏳ В обработке',
                 'approved': '✅ Одобрен',
                 'rejected': '❌ Отклонен'
-            }.get(w['status'], '❓ Неизвестно')
+            }.get(w.status, '❓ Неизвестно')
             
-            history_text += f"""🆔 Заявка `{w['id']}`
-💰 Сумма: *{w['amount']} ₽*
-💳 Метод: *{w['method'].upper()}*
-📅 Дата: {datetime.fromisoformat(w['date']).strftime('%d.%m.%Y %H:%M')}
-📌 Статус: {status}\n\n"""
+            history_text += f"""🆔 Заявка `{w.id}`
+💰 Сумма: *{format_currency(w.amount)}*
+💳 Система: *{w.method.upper()}*
+📅 Дата: {w.date.strftime('%d.%m.%Y %H:%M')}
+✨ Статус: {status}\n\n"""
     
-    keyboard = [
-        [InlineKeyboardButton("💸 Создать вывод", callback_data='withdraw')],
-        [InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]
-    ]
+    keyboard = [[InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]]
     
     if update.callback_query:
         await update.callback_query.edit_message_text(
@@ -918,147 +680,91 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка текстовых сообщений"""
     user_id = update.effective_user.id
     
-    if 'waiting_for' not in context.user_data:
-        return
-    
-    waiting_for = context.user_data['waiting_for']
-    
-    if waiting_for == 'payment_details':
-        if 'withdraw' not in context.user_data:
-            await update.message.reply_text("❌ Что-то пошло не так. Начните вывод заново.")
-            return
-            
-        withdraw_data = context.user_data['withdraw']
-        details = update.message.text
-        
-        # Проверяем минимальную сумму
-        if withdraw_data['amount'] < MIN_WITHDRAW:
-            await update.message.reply_text(f"❌ Минимальная сумма вывода {MIN_WITHDRAW} ₽")
-            return
-            
-        # Проверяем баланс
-        if withdraw_data['amount'] > users[user_id]['balance']:
-            await update.message.reply_text("❌ Недостаточно средств на балансе")
-            return
-            
-        # Создаем заявку на вывод
-        withdrawal = {
-            'id': f"W{int(datetime.now().timestamp())}",
-            'amount': withdraw_data['amount'],
-            'method': withdraw_data['method'],
-            'details': details,
-            'status': 'pending',
-            'date': datetime.now().isoformat()
-        }
-        
-        # Сохраняем заявку
-        if 'withdrawals_history' not in users[user_id]:
-            users[user_id]['withdrawals_history'] = []
-        users[user_id]['withdrawals_history'].append(withdrawal)
-        
-        # Уменьшаем баланс
-        users[user_id]['balance'] -= withdrawal['amount']
-        users[user_id]['withdrawals'] = users[user_id].get('withdrawals', 0) + withdrawal['amount']
-        save_users_data()
-        
-        # Уведомляем пользователя
-        success_text = f"""✅ *Заявка на вывод создана!*
-
-💰 Сумма: *{withdrawal['amount']} ₽*
-💳 Система: *{withdrawal['method'].upper()}*
-🆔 Номер заявки: `{withdrawal['id']}`
-
-⏳ Срок обработки до 24 часов
-📱 Статус можно проверить в разделе "История выводов"
-⚡️ Администраторы уведомлены о вашей заявке"""
-
-        keyboard = [
-            [InlineKeyboardButton("📋 История выводов", callback_data='history')],
-            [InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]
-        ]
-        
-        # Уведомляем админов
-        await notify_admins_about_withdrawal(context, user_id, withdrawal)
+    # Проверка на блокировку
+    if is_blocked(user_id):
         await update.message.reply_text(
-            success_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            "🚫 Вы заблокированы в боте",
             parse_mode=ParseMode.MARKDOWN
         )
-        
-        # Уведомляем админов
-        admin_notify = f"""💰 *Новая заявка на вывод!*
+        return
+    
+    # Проверяем наличие пользователя
+    user = db.get_user(user_id)
+    if not user:
+        await update.message.reply_text(
+            "❌ Пожалуйста, начните с команды /start",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Начать", callback_data='menu')
+            ]])
+        )
+        return
+    
+    # Проверка подписки для обычных пользователей
+    if not is_admin(user_id):
+        is_subscribed = await check_channel_subscription(context, user_id)
+        if not is_subscribed:
+            await show_channel_check(update, context)
+            return
+    
+    waiting_for = context.user_data.get('waiting_for')
+    
+    # Обработка платежных реквизитов
+    if waiting_for == 'payment_details':
+        await handle_payment_details(update, context)
+        return
+    
+    # Обработка админских команд
+    elif waiting_for in ['broadcast_message', 'user_id_for_message', 'user_id_to_block', 'user_id_to_unblock'] and is_admin(user_id):
+        await handle_admin_message(update, context)
+        return
+    
+    # Для неизвестных сообщений показываем меню
+    else:
+        await start(update, context)
 
-👤 Пользователь: `{user_id}`
-💵 Сумма: *{withdrawal['amount']} ₽*
-💳 Система: *{withdrawal['method'].upper()}*
-📝 Реквизиты: `{details}`
-🆔 Номер заявки: `{withdrawal['id']}`"""
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ошибок"""
+    # Получаем информацию об ошибке
+    error = context.error
+    logger.error(f"Update {update} caused error {error}")
+    
+    try:
+        # Получаем статистику
+        stats = db.get_user_statistics()
+        
+        # Отправляем сообщение об ошибке админам
+        error_text = f"""❌ *Произошла ошибка!*
+
+🔄 Update ID: `{update.update_id if update else 'Unknown'}`
+👤 User: `{update.effective_user.id if update and update.effective_user else 'Unknown'}`
+📊 Всего пользователей: *{stats['total_users']}*
+⚠️ Error: `{str(error)}`"""
 
         for admin_id in ADMIN_IDS:
             try:
                 await context.bot.send_message(
-                    admin_id,
-                    admin_notify,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("✅ Подтвердить", callback_data=f'approve_{withdrawal["id"]}'),
-                        InlineKeyboardButton("❌ Отклонить", callback_data=f'reject_{withdrawal["id"]}')
-                    ]])
-                )
-            except TelegramError:
-                logger.error(f"Не удалось отправить уведомление админу {admin_id}")
-        
-        # Очищаем данные
-        del context.user_data['withdraw']
-        del context.user_data['waiting_for']
-    
-    elif waiting_for == 'broadcast_message' and is_admin(user_id):
-        message = update.message.text
-        success_count = 0
-        fail_count = 0
-        
-        for uid in users.keys():
-            try:
-                await context.bot.send_message(
-                    uid,
-                    message,
+                    chat_id=admin_id,
+                    text=error_text,
                     parse_mode=ParseMode.MARKDOWN
                 )
-                success_count += 1
-                await asyncio.sleep(0.1)  # Защита от флуда
-            except Exception as e:
-                logger.error(f"Ошибка отправки сообщения пользователю {uid}: {e}")
-                fail_count += 1
-        
-        result_text = f"""📢 *Рассылка завершена*
-
-✅ Успешно отправлено: *{success_count}*
-❌ Ошибок отправки: *{fail_count}*
-📊 Всего пользователей: *{len(users)}*"""
-        
-        keyboard = [[InlineKeyboardButton("⬅️ Админ панель", callback_data='admin_panel')]]
-        await update.message.reply_text(
-            result_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        del context.user_data['waiting_for']
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик ошибок"""
-    logger.error(f"Произошла ошибка при обработке обновления {update}: {context.error}")
-    
-    try:
+            except:
+                continue
+                
+        # Отправляем пользователю сообщение об ошибке
         if update and update.effective_message:
+            error_msg = """❌ *Произошла ошибка*
+
+Пожалуйста, попробуйте позже или обратитесь в поддержку."""
+            
             await update.effective_message.reply_text(
-                "❌ Произошла ошибка при обработке запроса. Пожалуйста, попробуйте позже.",
+                error_msg,
+                parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔄 Перезапустить", callback_data='menu')
+                    InlineKeyboardButton("🔄 Главное меню", callback_data='menu')
                 ]])
             )
-    except:
-        logger.exception("Ошибка при отправке сообщения об ошибке")
+    except Exception as e:
+        logger.error(f"Error in error handler: {e}")
 
 async def send_analytics(context: ContextTypes.DEFAULT_TYPE):
     """Отправка сообщения в чат каждые 5 минут"""
@@ -1078,7 +784,7 @@ async def send_analytics(context: ContextTypes.DEFAULT_TYPE):
 📅 {now.strftime('%d.%m.%Y %H:%M')}
 
 ✅ Бот работает нормально
-👥 Всего пользователей: {len(users)}
+👥 Всего пользователей: {db.get_user_statistics()['total_users']}
 🔄 Режим: {"Webhook" if os.getenv('RENDER') else "Polling"}"""
         
         try:
@@ -1112,127 +818,38 @@ async def get_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     await update.message.reply_text(f"ID этого чата: `{chat_id}`", parse_mode=ParseMode.MARKDOWN)
 
-async def main():
+def main():
     """Запуск бота"""
-    # Создание приложения
+    # Инициализация бота
     application = Application.builder().token(TOKEN).build()
 
-    # Регистрация обработчиков
+    # Команды
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("chatid", get_chat_id))
-    application.add_handler(CallbackQueryHandler(handle_subscription_check, pattern="^check_subscription$"))
+    
+    # Обработка нажатий на кнопки
     application.add_handler(CallbackQueryHandler(button))
+    
+    # Обработка текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Обработка ошибок
     application.add_error_handler(error_handler)
 
-    # Определяем режим запуска (webhook для Render.com, polling для локальной разработки)
-    port = int(os.getenv('PORT', 3000))
-    webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL')}/{TOKEN}" if os.getenv('RENDER') else None
+    # Запуск бота
+    if WEBHOOK_ENABLED:
+        # Запуск через webhook для production
+        logger.info(f"Запуск бота через webhook на порту {PORT}")
+        application.run_webhook(
+            listen='0.0.0.0',
+            port=PORT,
+            webhook_url=WEBHOOK_URL,
+            url_path=TOKEN
+        )
+    else:
+        # Запуск через polling для разработки
+        logger.info("Запуск бота через long polling")
+        application.run_polling()
 
-    try:
-        # Инициализация приложения
-        await application.initialize()
-        
-        # Настройка периодической отправки аналитики
-        job_queue = application.job_queue
-        job_queue.run_repeating(send_analytics, interval=300, first=10)
-
-        if webhook_url:
-            # Настройка webhook для Render.com
-            logger.info(f"Настройка webhook на URL: {webhook_url}")
-            
-            # Удаляем старый webhook перед установкой нового
-            await application.bot.delete_webhook(drop_pending_updates=True)
-            
-            # Добавляем задержку перед установкой нового webhook для избежания rate limiting
-            await asyncio.sleep(2)
-            
-            # Устанавливаем новый webhook с защитой от rate limiting
-            for attempt in range(3):
-                try:
-                    await application.bot.set_webhook(
-                        url=webhook_url,
-                        allowed_updates=["message", "callback_query", "chat_member"],
-                        drop_pending_updates=True,
-                        max_connections=100
-                    )
-                    break
-                except Exception as e:
-                    if attempt == 2:
-                        logger.error(f"Не удалось установить webhook после 3 попыток: {e}")
-                        raise
-                    logger.warning(f"Попытка {attempt + 1} установки webhook не удалась: {e}")
-                    await asyncio.sleep(5)
-            
-            # Отправка сообщения о запуске
-            if ANALYTICS_CHAT_ID:
-                try:
-                    await application.bot.send_message(
-                        chat_id=ANALYTICS_CHAT_ID,
-                        text="🚀 *Бот успешно запущен в режиме webhook!*\n\n📅 Время запуска: " + datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                except Exception as e:
-                    logger.error(f"Ошибка отправки сообщения о запуске: {e}")
-            
-            # Запуск webhook сервера
-            logger.info(f"Запуск webhook сервера на порту {port}")
-            await application.start()
-            await application.updater.start_webhook(
-                listen='0.0.0.0',
-                port=port,
-                url_path=TOKEN,
-                webhook_url=webhook_url,
-                drop_pending_updates=True
-            )
-            
-            # В режиме webhook используем бесконечный цикл для поддержания работы
-            stop_signal = asyncio.Event()
-            await stop_signal.wait()
-            
-        else:
-            # Локальный запуск в режиме polling
-            logger.info("Запуск в режиме polling")
-            await application.bot.delete_webhook(drop_pending_updates=True)
-            await application.start()
-            await application.updater.start_polling(drop_pending_updates=True)
-            await application.updater.idle()
-            
-    except Exception as e:
-        logger.error(f"Ошибка при запуске бота: {e}", exc_info=True)
-        raise
-    finally:
-        # Корректное завершение работы
-        try:
-            logger.info("Начинаю процесс завершения работы бота...")
-            if webhook_url:
-                try:
-                    await application.bot.delete_webhook()
-                    logger.info("Webhook успешно удален")
-                except Exception as e:
-                    logger.error(f"Ошибка при удалении webhook: {e}")
-            
-            if application.updater and application.updater.running:
-                await application.updater.stop()
-                logger.info("Updater остановлен")
-            
-            if application.running:
-                await application.stop()
-                logger.info("Application остановлен")
-            
-            await application.shutdown()
-            logger.info("Бот успешно завершил работу")
-            
-        except Exception as e:
-            logger.error(f"Ошибка при остановке бота: {e}", exc_info=True)
-
+# Запуск
 if __name__ == '__main__':
-    try:
-        import asyncio
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем!")
-    except Exception as e:
-        logger.error(f"Критическая ошибка: {e}", exc_info=True)
-    finally:
-        logger.info("Бот завершил работу")
+    main()

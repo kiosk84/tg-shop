@@ -1,11 +1,11 @@
 from datetime import datetime
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 from config import ADMIN_IDS
-from utils.keyboards import Keyboards
 from utils.database import Database
+from utils.keyboards import Keyboards
 from utils.helpers import format_currency
 
 db = Database()
@@ -17,35 +17,35 @@ async def show_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in ADMIN_IDS:
         return
     
-    keyboard = Keyboards.admin_panel()
-    admin_text = """👑 *АДМИН ПАНЕЛЬ*
+    stats = db.get_user_statistics()
+    admin_text = f"""👑 *АДМИН-ПАНЕЛЬ*
 
-🎛️ Доступные функции:
+📊 *Статистика пользователей:*
+👥 Всего пользователей: *{stats['total_users']}*
+✅ Активных: *{stats['active_users']}*
+🚫 Заблокировано: *{stats['blocked_users']}*
 
-👥 Управление пользователями:
-• Просмотр статистики
-• Блокировка/разблокировка
-• Поиск пользователей
+📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
 
-📢 Рассылка:
-• Отправка сообщений всем
-• Отправка конкретному пользователю
-
-📊 Аналитика:
-• Общая статистика бота
-• Топ пользователей
-• Финансовая статистика"""
-
+    keyboard = [
+        [InlineKeyboardButton("📊 Подробная статистика", callback_data='admin_stats'),
+         InlineKeyboardButton("📢 Рассылка", callback_data='admin_broadcast')],
+        [InlineKeyboardButton("✉️ Написать пользователю", callback_data='admin_send_user'),
+         InlineKeyboardButton("🚫 Заблокировать", callback_data='admin_block')],
+        [InlineKeyboardButton("✅ Разблокировать", callback_data='admin_unblock')],
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data='menu')]
+    ]
+    
     if update.callback_query:
         await update.callback_query.edit_message_text(
             text=admin_text,
-            reply_markup=keyboard,
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
     else:
         await update.message.reply_text(
             text=admin_text,
-            reply_markup=keyboard,
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -134,11 +134,12 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception:
                 failed += 1
 
+        stats = db.get_user_statistics()
         result = f"""📢 *Результаты рассылки*
 
 ✅ Успешно отправлено: *{success}*
 ❌ Ошибок отправки: *{failed}*
-📊 Всего пользователей: *{len(users)}*"""
+📊 Всего пользователей: *{stats['total_users']}*"""
 
         await update.message.reply_text(
             text=result,
