@@ -441,6 +441,47 @@ class TelegramBot:
         
         self.logger.info("🚀 Bot initialized successfully")
     
+    def setup_handlers(self, application: Application) -> None:
+        """Настройка обработчиков команд"""
+        # Основные команды
+        application.add_handler(CommandHandler("start", self.start))
+        application.add_handler(CommandHandler("admin", handle_admin_command))
+        
+        # Обработчики callback кнопок
+        application.add_handler(CallbackQueryHandler(self.button_handler))
+        
+        # Обработчик текстовых сообщений для админов
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            handle_admin_message
+        ))
+        
+        self.logger.info("✅ Handlers configured successfully")
+    
+    async def post_init(self, application: Application) -> None:
+        """Инициализация после запуска"""
+        try:
+            # Инициализация базы данных
+            self.db.init_db()
+            self.logger.info("✅ Database initialized")
+            
+            # Получение информации о боте
+            bot_info = await application.bot.get_me()
+            self.logger.info(f"✅ Bot @{bot_info.username} started successfully")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error in post_init: {e}")
+            raise
+    
+    async def cleanup(self, application: Application) -> None:
+        """Очистка ресурсов при завершении"""
+        try:
+            if hasattr(self.db, 'session') and self.db.session:
+                self.db.session.close()
+            self.logger.info("✅ Resources cleaned up")
+        except Exception as e:
+            self.logger.error(f"❌ Error in cleanup: {e}")
+    
     async def handle_daily_bonus(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработка ежедневного бонуса с улучшениями"""
         try:
@@ -871,420 +912,65 @@ class TelegramBot:
     
     async def _handle_unknown_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обработка неизвестных callback команд"""
-        await update.callback_query.edit_message_text(
-            "🚧 *Функция в разработке*\n\nЭтот раздел скоро будет доступен!",
-            reply_markup=KeyboardBuilder.build_back_keyboard('menu'),
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.callback_query.answer("❓ Неизвестная команда", show_alert=True)
+        await self.start(update, context)
     
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработка текстовых сообщений с улучшениями"""
+    async def _send_error_message(self, update: Update, error_text: str) -> None:
+        """Отправка сообщения об ошибке"""
         try:
-            user_id = update.effective_user.id
-            
-            # Проверка на блокировку
-            if self.user_service.is_blocked(user_id):
-                await update.message.reply_text(
-                    "🚫 *Доступ ограничен*\n\nВаш аккаунт временно заблокирован.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            # Проверяем наличие пользователя
-            user = self.db.get_user(user_id)
-            if not user:
-                await update.message.reply_text(
-                    "❌ *Ошибка авторизации*\n\nПожалуйста, начните с команды /start",
-                    reply_markup=KeyboardBuilder.build_back_keyboard('menu'),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            # Проверка подписки для обычных пользователей
-            if not self.user_service.is_admin(user_id):
-                is_subscribed = await check_channel_subscription(context, user_id)
-                if not is_subscribed:
-                    await show_channel_check(update, context)
-                    return
-            
-            waiting_for = context.user_data.get('waiting_for')
-            
-            # Обработка платежных реквизитов
-            if waiting_for == 'payment_details':
-                await handle_payment_details(update, context)
-                return
-            
-            # Обработка произвольной суммы для вывода
-            elif waiting_for == 'custom_withdrawal_amount':
-                await self._handle_custom_withdrawal_amount(update, context)
-                return
-            
-            # Обработка произвольной суммы для инвестиций
-            elif waiting_for and waiting_for.startswith('custom_invest_'):
-                plan_type = waiting_for.replace('custom_invest_', '')
-                await self._handle_custom_investment_amount(update, context, plan_type)
-                return
-            
-            # Обработка админских команд
-            elif waiting_for in [
-                'broadcast_message', 'user_id_for_message', 'user_id_to_block', 
-                'user_id_to_unblock', 'manual_balance_user', 'manual_balance_amount'
-            ] and self.user_service.is_admin(user_id):
-                await handle_admin_message(update, context)
-                return
-            
-            # Для неизвестных сообщений показываем справку
-            else:
-                await self._show_help_message(update, context)
-                
-        except Exception as e:
-            self.logger.error(f"Error in handle_message: {e}")
-            await self._send_error_message(update, "Ошибка при обработке сообщения")
-    
-    # ... existing code ...
-    async def _handle_custom_withdrawal_amount(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработка произвольной суммы для вывода"""
-        try:
-            amount_text = update.message.text.strip()
-            
-            # Проверяем, что введено число
-            try:
-                amount = int(amount_text)
-            except ValueError:
-                await update.message.reply_text(
-                    "❌ *Неверный формат*\n\nВведите сумму числом, например: 500",
-                    reply_markup=KeyboardBuilder.build_back_keyboard('withdraw'),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            user = self.db.get_user(update.effective_user.id)
-            if not user:
-                await update.message.reply_text(
-                    "❌ Пользователь не найден. Пожалуйста, начните с /start.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            validation = self.withdrawal_service.validate_withdrawal(user, amount)
-            
-            if not validation['valid']:
-                await update.message.reply_text(
-                    validation['error'],
-                    reply_markup=KeyboardBuilder.build_back_keyboard('withdraw'),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            # Очищаем состояние ожидания
-            context.user_data.pop('waiting_for', None)
-            
-            # Показываем выбор способа оплаты
-            payment_text = f"""💸 *ВЫБОР СПОСОБА ВЫВОДА*
-
-💰 Сумма к выводу: *{format_currency(amount)}*
-💎 Остаток на балансе: *{format_currency(user.balance - amount)}*
-
-🔒 Выберите удобный способ получения средств:"""
-
-            keyboard = KeyboardBuilder.build_payment_keyboard(amount)
-            await update.message.reply_text(
-                payment_text,
-                reply_markup=keyboard,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Error in _handle_custom_withdrawal_amount: {e}")
-            await self._send_error_message(update, "Ошибка при обработке суммы")
-    
-    async def _handle_custom_investment_amount(self, update: Update, context: ContextTypes.DEFAULT_TYPE, plan_type: str) -> None:
-        """Обработка произвольной суммы для инвестиций"""
-        try:
-            amount_text = update.message.text.strip()
-            
-            # Проверяем, что введено число
-            try:
-                amount = int(amount_text)
-            except ValueError:
-                await update.message.reply_text(
-                    "❌ *Неверный формат*\n\nВведите сумму числом, например: 1000",
-                    reply_markup=KeyboardBuilder.build_back_keyboard('investments'),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            user = self.db.get_user(update.effective_user.id)
-            if not user:
-                await update.message.reply_text(
-                    "❌ Пользователь не найден. Пожалуйста, начните с /start.",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            # Получаем параметры плана
-            plan_config = {
-                'starter': {'min': 100, 'rate': 1.2, 'name': '🌱 Стартер'},
-                'standard': {'min': 1000, 'rate': 1.8, 'name': '💎 Стандарт'},
-                'premium': {'min': 5000, 'rate': 2.5, 'name': '🚀 Премиум'},
-                'vip': {'min': 20000, 'rate': 3.5, 'name': '👑 VIP'}
-            }.get(plan_type)
-            
-            if not plan_config:
-                await update.message.reply_text(
-                    "❌ *Неизвестный план*",
-                    reply_markup=KeyboardBuilder.build_back_keyboard('investments'),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            # Валидация суммы
-            if amount < plan_config['min']:
-                await update.message.reply_text(
-                    f"❌ *Недостаточная сумма*\n\nМинимум для плана {plan_config['name']}: {plan_config['min']:,}₽",
-                    reply_markup=KeyboardBuilder.build_back_keyboard('investments'),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            if amount > user.balance:
-                await update.message.reply_text(
-                    f"💸 *Недостаточно средств*\n\nНеобходимо: {amount:,}₽\nДоступно: {user.balance:,}₽",
-                    reply_markup=KeyboardBuilder.build_back_keyboard('investments'),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            
-            # Очищаем состояние ожидания
-            context.user_data.pop('waiting_for', None)
-            
-            # Рассчитываем прибыль
-            daily_profit = int(amount * plan_config['rate'] / 100)
-            total_profit = daily_profit * 30  # 30 дней
-            
-            # Показываем подтверждение
-            confirm_text = f"""📈 *ПОДТВЕРЖДЕНИЕ ИНВЕСТИЦИИ*
-
-📊 План: {plan_config['name']}
-💰 Сумма инвестиции: *{format_currency(amount)}*
-📈 Ставка: *{plan_config['rate']}% в день*
-💵 Ежедневная прибыль: *{format_currency(daily_profit)}*
-🎯 Общая прибыль за 30 дней: *{format_currency(total_profit)}*
-💎 Итого к получению: *{format_currency(amount + total_profit)}*
-
-⚠️ Средства будут списаны с вашего баланса немедленно.
-✅ Подтвердите создание инвестиции:"""
-
-            keyboard = KeyboardBuilder.build_confirmation_keyboard('invest', f'{plan_type}_{amount}')
-            await update.message.reply_text(
-                confirm_text,
-                reply_markup=keyboard,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-        except Exception as e:
-            self.logger.error(f"Error in _handle_custom_investment_amount: {e}")
-            await self._send_error_message(update, "Ошибка при обработке суммы инвестиции")
-    
-    async def _show_help_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Показать справочное сообщение"""
-        help_text = """❓ *СПРАВКА ПО БОТУ*
-
-🤖 Я не понимаю ваше сообщение. Используйте кнопки меню для навигации.
-
-📋 *Основные команды:*
-├ /start - Главное меню
-├ Используйте кнопки для навигации
-└ Следуйте инструкциям бота
-
-💡 *Нужна помощь?*
-├ Изучите раздел "💡 Как заработать"
-├ Посмотрите FAQ в нашем канале
-└ Обратитесь в поддержку
-
-🔄 Нажмите кнопку ниже для возврата в главное меню:"""
-
-        keyboard = KeyboardBuilder.build_back_keyboard('menu')
-        await update.message.reply_text(
-            help_text,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Улучшенная обработка ошибок"""
-        try:
-            error = context.error
-            self.logger.error(f"Update {update} caused error {error}")
-            
-            # Получаем статистику для контекста
-            stats = self.db.get_user_statistics()
-            
-            # Формируем детальное сообщение об ошибке
-            error_text = f"""🚨 *СИСТЕМНАЯ ОШИБКА*
-
-🆔 Update ID: `{update.update_id if update else 'Unknown'}`
-👤 User ID: `{update.effective_user.id if update and update.effective_user else 'Unknown'}`
-📊 Активных пользователей: *{stats['active_users']}*
-🕐 Время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
-
-⚠️ Ошибка: `{str(error)[:200]}...`
-
-🔧 Требуется внимание разработчика"""
-
-            # Отправляем уведомление админам
-            for admin_id in ADMIN_IDS:
-                try:
-                    await context.bot.send_message(
-                        chat_id=admin_id,
-                        text=error_text,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                except Exception as admin_error:
-                    self.logger.error(f"Failed to send error message to admin {admin_id}: {admin_error}")
-            
-            # Пытаемся отправить пользователю дружелюбное сообщение об ошибке
-            if update and update.effective_chat:
-                try:
-                    error_user_text = """⚠️ *Произошла техническая ошибка*
-
-🔧 Мы уже знаем о проблеме и работаем над её устранением.
-
-💡 Попробуйте:
-├ Перезапустить бота командой /start
-├ Повторить действие через минуту
-└ Обратиться в поддержку, если проблема повторяется
-
-📞 Поддержка: @admin"""
-                    
-                    keyboard = KeyboardBuilder.build_back_keyboard('menu')
-                    
-                    if update.callback_query:
-                        await update.callback_query.edit_message_text(
-                            error_user_text,
-                            reply_markup=keyboard,
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                    elif update.message:
-                        await update.message.reply_text(
-                            error_user_text,
-                            reply_markup=keyboard,
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                except Exception as user_error:
-                    self.logger.error(f"Failed to send error message to user: {user_error}")
-                    
-        except Exception as handler_error:
-            self.logger.critical(f"Error in error_handler: {handler_error}")
-    
-    async def _send_error_message(self, update: Update, message: str) -> None:
-        """Отправка сообщения об ошибке пользователю"""
-        try:
-            error_text = f"⚠️ *{message}*\n\nПопробуйте повторить позже или обратитесь в поддержку."
+            error_message = f"❌ {error_text}\n\n🔄 Попробуйте еще раз или обратитесь в поддержку."
             keyboard = KeyboardBuilder.build_back_keyboard('menu')
             
             if update.callback_query:
                 await update.callback_query.edit_message_text(
-                    error_text,
+                    error_message,
                     reply_markup=keyboard,
                     parse_mode=ParseMode.MARKDOWN
                 )
-            elif update.message:
+            else:
                 await update.message.reply_text(
-                    error_text,
+                    error_message,
                     reply_markup=keyboard,
                     parse_mode=ParseMode.MARKDOWN
                 )
         except Exception as e:
-            self.logger.error(f"Error in _send_error_message: {e}")
+            self.logger.error(f"Error sending error message: {e}")
+
+# ... existing code ...
+
+async def start_webhook(application, webhook_url, port):
+    """Запуск бота в режиме webhook"""
+    # Удаляем предыдущие вебхуки
+    await application.bot.delete_webhook(drop_pending_updates=True)
     
-    def setup_handlers(self, application: Application) -> None:
-        """Настройка обработчиков команд с улучшениями"""
-        try:
-            # Команды
-            application.add_handler(CommandHandler("start", self.start))
-            application.add_handler(CommandHandler("admin", handle_admin_command))
-            
-            # Обработчики callback запросов
-            application.add_handler(CallbackQueryHandler(self.button_handler))
-            
-            # Обработчик сообщений
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-            
-            # Обработчик ошибок
-            application.add_error_handler(self.error_handler)
-            
-            self.logger.info("✅ All handlers registered successfully")
-            
-        except Exception as e:
-            self.logger.error(f"Error setting up handlers: {e}")
-            raise
+    # Устанавливаем вебхук
+    await application.bot.set_webhook(
+        url=webhook_url,
+        drop_pending_updates=True
+    )
     
-    async def post_init(self, application: Application) -> None:
-        """Инициализация после запуска бота"""
-        try:
-            self.logger.info("🤖 Bot started successfully")
-            
-            # Отправляем уведомление админам о запуске
-            bot_info = await application.bot.get_me()
-            startup_message = f"""🚀 *БОТ ЗАПУЩЕН УСПЕШНО*
-
-🤖 Имя: *{bot_info.first_name}*
-🆔 ID: `{bot_info.id}`
-👤 Username: @{bot_info.username}
-🕐 Время запуска: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
-
-✅ Все системы работают нормально
-📊 База данных подключена
-🔧 Обработчики зарегистрированы"""
-
-            for admin_id in ADMIN_IDS:
-                try:
-                    await application.bot.send_message(
-                        chat_id=admin_id,
-                        text=startup_message,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Failed to send startup message to admin {admin_id}: {e}")
-                    
-        except Exception as e:
-            self.logger.error(f"Error in post_init: {e}")
+    # Инициализируем приложение
+    await application.initialize()
+    await application.start()
     
-    async def cleanup(self, application: Application) -> None:
-        """Очистка ресурсов при завершении работы"""
-        try:
-            self.logger.info("🛑 Bot shutdown initiated")
-            
-            # Закрываем соединение с базой данных
-            if hasattr(self.db, 'session'):
-                self.db.session.close()
-            
-            # Уведомляем админов о выключении
-            shutdown_message = f"""🛑 *БОТ ОСТАНОВЛЕН*
-
-🕐 Время остановки: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}
-
-⚠️ Бот временно недоступен для пользователей
-🔧 Ведутся технические работы"""
-
-            for admin_id in ADMIN_IDS:
-                try:
-                    await application.bot.send_message(
-                        chat_id=admin_id,
-                        text=shutdown_message,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Failed to send shutdown message to admin {admin_id}: {e}")
-                    
-            self.logger.info("✅ Bot shutdown completed")
-            
-        except Exception as e:
-            self.logger.error(f"Error in cleanup: {e}")
+    # Настраиваем веб-сервер
+    server = await asyncio.create_task(
+        application.updater.start_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=TOKEN,
+            webhook_url=webhook_url,
+            drop_pending_updates=True
+        )
+    )
+    
+    return server
 
 async def main():
-    """Главная функция запуска бота с улучшениями"""
+    """Главная функция запуска бота"""
+    application = None
+    cron_server = None
+    
     try:
         # Создаем экземпляр бота
         telegram_bot = TelegramBot()
@@ -1300,38 +986,52 @@ async def main():
         application.post_shutdown = telegram_bot.cleanup
         
         # Получаем URL приложения из переменных окружения
-        app_url = os.getenv('APP_URL')
-        
-        # Запускаем cron сервер для автоматических начислений
-        if app_url:
-            cron_server = CronServer(app_url)
-            await cron_server.start()
-        else:
-            telegram_bot.logger.warning("APP_URL not set in environment variables")
+        app_url = os.getenv('RENDER_EXTERNAL_URL')
         
         telegram_bot.logger.info("🚀 Starting telegram bot...")
         
-        # Настройка порта для Render
-        port = int(os.getenv('PORT', '8080'))
-        
-        # Определяем режим работы (webhook или polling)
+        # Определяем режим работы
         if app_url and os.getenv('RENDER'):
-            # Настройка webhook для Render
-            telegram_bot.logger.info("🚀 Starting in webhook mode...")
-            webhook_url = f"https://{app_url}/{TOKEN}"
-            await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+            # Режим webhook для Render
+            telegram_bot.logger.info("📡 Starting in webhook mode...")
             
-            # Запускаем веб-сервер для обработки вебхуков
-            await application.run_webhook(
-                listen="0.0.0.0",
-                port=port,
-                url_path=TOKEN,
-                webhook_url=webhook_url,
-                drop_pending_updates=True
-            )
+            # Настройка порта для Render
+            port = int(os.getenv('PORT', '8080'))
+            
+            # Формируем URL для вебхука
+            webhook_url = f"https://{app_url}/{TOKEN}"
+            telegram_bot.logger.info(f"🔗 Webhook URL: {webhook_url}")
+            
+            # Запускаем cron сервер для автоматических начислений
+            try:
+                cron_server = CronServer(app_url)
+                await cron_server.start()
+                telegram_bot.logger.info("⏰ Cron server started")
+            except Exception as e:
+                telegram_bot.logger.warning(f"⚠️ Failed to start cron server: {e}")
+            
+            # Запускаем webhook
+            server = await start_webhook(application, webhook_url, port)
+            telegram_bot.logger.info(f"✅ Webhook server started on port {port}")
+            
+            # Бесконечный цикл для поддержания работы
+            while True:
+                await asyncio.sleep(3600)  # Проверяем каждый час
+                
         else:
-            # Запускаем в режиме long polling
-            telegram_bot.logger.info("🚀 Starting in polling mode...")
+            # Режим long polling для локальной разработки
+            telegram_bot.logger.info("🔄 Starting in polling mode...")
+            
+            # Запускаем cron сервер (если нужен)
+            try:
+                if app_url:
+                    cron_server = CronServer(app_url)
+                    await cron_server.start()
+                    telegram_bot.logger.info("⏰ Cron server started")
+            except Exception as e:
+                telegram_bot.logger.warning(f"⚠️ Failed to start cron server: {e}")
+            
+            # Запускаем polling
             await application.run_polling(
                 poll_interval=1.0,
                 timeout=10,
@@ -1344,18 +1044,14 @@ async def main():
     except KeyboardInterrupt:
         telegram_bot.logger.info("🛑 Bot stopped by user")
     except Exception as e:
-        telegram_bot.logger.critical(f"Critical error in main: {e}")
-        raise
-    finally:
-        # Очистка ресурсов
-        if 'cron_server' in locals():
-            await cron_server.stop()
-        telegram_bot.logger.info("🏁 Application terminated")
+        telegram_bot.logger.critical(f"💥 Critical error in main: {e}")
+        
+        # Отправляем уведомление админам об ошибке
+        if application:
+            error_message = f"""🚨 *КРИТИЧЕСКАЯ ОШИБКА БОТА*
 
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped by user")
-    except Exception as e:
-        print(f"❌ Critical error: {e}")
+⚠️ Бот остановлен из-за критической ошибки:
+```
+{e}
+```
+"""
