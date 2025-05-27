@@ -944,6 +944,10 @@ async def start_webhook(application, webhook_url, port):
         # Удаляем предыдущие вебхуки
         await application.bot.delete_webhook(drop_pending_updates=True)
         
+        # Формируем URL для вебхука
+        webhook_url = f"{webhook_url.rstrip('/')}/{TOKEN}"
+        logger.info(f"Setting webhook to: {webhook_url}")
+        
         # Устанавливаем вебхук
         await application.bot.set_webhook(
             url=webhook_url,
@@ -956,7 +960,7 @@ async def start_webhook(application, webhook_url, port):
         
         # Настраиваем веб-сервер
         await application.updater.start_webhook(
-            listen="0.0.0.0",
+            listen='0.0.0.0',
             port=port,
             url_path=TOKEN,
             webhook_url=webhook_url,
@@ -969,18 +973,26 @@ async def start_webhook(application, webhook_url, port):
         
         class HealthCheckHandler(BaseHTTPRequestHandler):
             def do_GET(self):
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b'OK')
+                if self.path == '/':
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(b'OK')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
         
         def run_health_check():
-            server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-            server.serve_forever()
+            server_address = ('', port)
+            httpd = HTTPServer(server_address, HealthCheckHandler)
+            logger.info(f"Starting health check server on port {port}")
+            httpd.serve_forever()
         
         # Запускаем health check в отдельном потоке
         health_thread = threading.Thread(target=run_health_check, daemon=True)
         health_thread.start()
         
+        logger.info(f"Webhook server started on port {port}")
         return True
     except Exception as e:
         logger.error(f"Error in start_webhook: {e}")
@@ -1020,10 +1032,11 @@ async def main():
             
             # Настройка порта для Render
             port = int(os.getenv('PORT', '3000'))
+            telegram_bot.logger.info(f"🔌 Using port: {port}")
             
-            # Формируем URL для вебхука
-            webhook_url = f"https://{app_url}/{TOKEN}"
-            telegram_bot.logger.info(f"🔗 Webhook URL: {webhook_url}")
+            # Формируем базовый URL для вебхука
+            base_url = f"https://{app_url}"
+            telegram_bot.logger.info(f"🌐 Base URL: {base_url}")
             
             # Запускаем cron сервер для автоматических начислений
             try:
@@ -1034,8 +1047,14 @@ async def main():
                 telegram_bot.logger.warning(f"⚠️ Failed to start cron server: {e}")
             
             # Запускаем webhook
-            server = await start_webhook(application, webhook_url, port)
-            telegram_bot.logger.info(f"✅ Webhook server started on port {port}")
+            telegram_bot.logger.info("🔄 Starting webhook...")
+            server_started = await start_webhook(application, base_url, port)
+            
+            if not server_started:
+                telegram_bot.logger.error("❌ Failed to start webhook server")
+                return
+                
+            telegram_bot.logger.info(f"✅ Webhook server started successfully on port {port}")
             
             # Бесконечный цикл для поддержания работы
             while True:
