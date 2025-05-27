@@ -1,4 +1,5 @@
-from telegram import Update, InlineKeyboardButton
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
@@ -9,7 +10,7 @@ from utils.helpers import format_currency, plural_form
 
 db = Database()
 
-async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_referral_program(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать реферальную статистику и ссылку"""
     query = update.callback_query
     user_id = query.from_user.id
@@ -29,30 +30,42 @@ async def handle_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
 `{ref_link}`
 
 📊 *Ваша статистика:*
-• Приглашено: *{len(referrals)}* {plural_form(len(referrals), ('друг', 'друга', 'друзей'))}
-• Заработано: *{format_currency(total_earned)}*
+├ Рефералов: {len(referrals)} {plural_form(len(referrals), ['человек', 'человека', 'человек'])}
+└ Заработано: {format_currency(total_earned)}"""
 
-🚀 *Как получить бонус:*
-1. Отправьте другу вашу реферальную ссылку
-2. Друг должен перейти по ссылке и запустить бота
-3. Вы получите {format_currency(REFERRAL_BONUS)} после подписки друга на канал
-
-💡 Чем больше друзей вы пригласите, тем больше заработаете!"""
-
-    share_button = [[
-        InlineKeyboardButton(
-            "📤 Поделиться ссылкой", 
-            url=f"https://t.me/share/url?url={ref_link}&text=🚀 Присоединяйся к крутому заработок-боту!"
-        )
-    ]]
-    keyboard = Keyboards.add_back_button(share_button)
-
+    keyboard = [[InlineKeyboardButton("« Назад", callback_data='main_menu')]]
     await query.edit_message_text(
         text=ref_text,
-        reply_markup=keyboard,
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN
     )
 
-async def create_ref_link(user_id: int, bot_username: str) -> str:
-    """Создание реферальной ссылки"""
-    return f"https://t.me/{bot_username}?start={user_id}"
+async def handle_referral_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка реферального бонуса"""
+    user = context.user_data.get('user')
+    referrer_id = context.user_data.get('referrer_id')
+    
+    if not user or not referrer_id:
+        return
+    
+    # Проверяем, что пользователь ещё не был зарегистрирован как реферал
+    if not db.check_referral_exists(referrer_id, user.id):
+        # Создаем запись о реферале
+        db.create_referral(referrer_id, user.id)
+        
+        # Начисляем бонус рефереру
+        referrer = db.get_user(referrer_id)
+        if referrer:
+            referrer.balance += REFERRAL_BONUS
+            db.session.commit()
+            
+            # Отправляем уведомление рефереру
+            try:
+                await context.bot.send_message(
+                    chat_id=referrer_id,
+                    text=f"🎉 Поздравляем! По вашей ссылке зарегистрировался новый пользователь.\n"
+                         f"💰 Вам начислен бонус: {format_currency(REFERRAL_BONUS)}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logging.error(f"Error sending referral bonus notification: {e}")
