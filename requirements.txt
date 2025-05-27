@@ -2,3 +2,6 @@ python-telegram-bot[job-queue,webhooks]==20.7
 python-dotenv==1.0.1
 aiohttp==3.9.3
 APScheduler~=3.10.4
+SQLAlchemy==2.0.15
+alembic==1.11.1  # для миграций базы данных
+aiohttp>=3.8.1

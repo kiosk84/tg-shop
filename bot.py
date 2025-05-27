@@ -8,28 +8,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-# Загрузка конфигурации из .env файла
-from dotenv import load_dotenv
-load_dotenv()
-
-# 🔐 Конфигурация бота
-TOKEN = os.getenv('BOT_TOKEN')
-DATA_FILE = 'users_data.json'
-BLOCKED_USERS_FILE = 'blocked_users.json'
-MIN_WITHDRAW = int(os.getenv('MIN_WITHDRAW', 50))
-DAILY_BONUS = int(os.getenv('DAILY_BONUS', 2))
-REFERRAL_BONUS = int(os.getenv('REFERRAL_BONUS', 5))
-
-# Чат для аналитики
-ANALYTICS_CHAT_ID = os.getenv('ANALYTICS_CHAT_ID')
-
-# 👑 Админы бота
-ADMIN_IDS = [int(id_) for id_ in os.getenv('ADMIN_IDS', '').split(',') if id_]
-
-# 📢 Настройки канала
-CHANNEL_ID = os.getenv('CHANNEL_ID')
-CHANNEL_LINK = os.getenv('CHANNEL_LINK')
-CHANNEL_NAME = os.getenv('CHANNEL_NAME')
+# Импортируем все настройки из config
+from config import *
 
 # 🎨 Настройка логирования
 logging.basicConfig(

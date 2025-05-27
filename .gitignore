@@ -2,14 +2,18 @@
 .env
 *.log
 
+# База данных SQLite
+*.db
+*.db-journal
+
 # Кэш Python
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Файлы данных
-users_data.json
-blocked_users.json
+# Миграции Alembic
+migrations/versions/*
+!migrations/versions/.gitkeep
 
 # Виртуальное окружение
 venv/
@@ -25,3 +29,7 @@ env/
 # Системные файлы
 .DS_Store
 Thumbs.db
+
+# Бэкапы
+backups/
+*.bak
