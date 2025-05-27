@@ -940,36 +940,59 @@ class TelegramBot:
 
 async def start_webhook(application, webhook_url, port):
     """Запуск бота в режиме webhook"""
-    # Удаляем предыдущие вебхуки
-    await application.bot.delete_webhook(drop_pending_updates=True)
-    
-    # Устанавливаем вебхук
-    await application.bot.set_webhook(
-        url=webhook_url,
-        drop_pending_updates=True
-    )
-    
-    # Инициализируем приложение
-    await application.initialize()
-    await application.start()
-    
-    # Настраиваем веб-сервер
-    server = await asyncio.create_task(
-        application.updater.start_webhook(
+    try:
+        # Удаляем предыдущие вебхуки
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        
+        # Устанавливаем вебхук
+        await application.bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True
+        )
+        
+        # Инициализируем приложение
+        await application.initialize()
+        await application.start()
+        
+        # Настраиваем веб-сервер
+        await application.updater.start_webhook(
             listen="0.0.0.0",
             port=port,
             url_path=TOKEN,
             webhook_url=webhook_url,
             drop_pending_updates=True
         )
-    )
-    
-    return server
+        
+        # Запускаем HTTP-сервер для проверки работоспособности
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        import threading
+        
+        class HealthCheckHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'OK')
+        
+        def run_health_check():
+            server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+            server.serve_forever()
+        
+        # Запускаем health check в отдельном потоке
+        health_thread = threading.Thread(target=run_health_check, daemon=True)
+        health_thread.start()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error in start_webhook: {e}")
+        return False
 
 async def main():
     """Главная функция запуска бота"""
     application = None
     cron_server = None
+    
+    # Получаем порт из переменных окружения
+    port = int(os.getenv('PORT', '3000'))
     
     try:
         # Создаем экземпляр бота
