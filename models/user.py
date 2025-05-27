@@ -45,13 +45,14 @@ class Investment(Base):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id'))
-    plan_id = Column(String)
+    plan_type = Column(String)
     amount = Column(Float)
     daily_profit = Column(Float)
-    total_profit = Column(Float, default=0)
+    current_profit = Column(Float, default=0)
     start_date = Column(DateTime, default=datetime.now)
+    end_date = Column(DateTime)
     last_profit_date = Column(DateTime, default=datetime.now)
-    status = Column(String, default='active')  # active, completed, cancelled
+    is_finished = Column(Boolean, default=False)
 
     user = relationship("User", back_populates="investments")
 

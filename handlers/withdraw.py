@@ -10,11 +10,28 @@ from utils.helpers import format_currency, validate_amount, validate_payment_det
 
 db = Database()
 
-async def handle_withdraw_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_withdraw_request(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int = None):
     """Обработка запроса на вывод средств"""
     query = update.callback_query
     user_id = query.from_user.id
     user = db.get_user(user_id)
+    
+    # Если указана сумма, обрабатываем запрос на вывод
+    if amount:
+        if amount > user.balance:
+            await query.answer("❌ Недостаточно средств", show_alert=True)
+            return
+        
+        # Показываем меню выбора способа оплаты
+        keyboard = Keyboards.payment_methods(amount)
+        await query.edit_message_text(
+            text=f"""💳 *Вывод {amount}₽*
+
+Выберите способ вывода средств:""",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
 
     # Показываем меню вывода средств
     keyboard = Keyboards.withdrawal_menu(user.balance)
