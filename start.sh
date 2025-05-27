@@ -6,7 +6,7 @@ if [ -f .env ]; then
 fi
 
 # Устанавливаем порт по умолчанию, если не задан
-PORT=${PORT:-8080}
+PORT=${PORT:-3000}
 
 # Экспортируем переменные для Python
 export PORT=$PORT

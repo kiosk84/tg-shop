@@ -1019,7 +1019,7 @@ async def main():
             telegram_bot.logger.info("📡 Starting in webhook mode...")
             
             # Настройка порта для Render
-            port = int(os.getenv('PORT', '8080'))
+            port = int(os.getenv('PORT', '3000'))
             
             # Формируем URL для вебхука
             webhook_url = f"https://{app_url}/{TOKEN}"
