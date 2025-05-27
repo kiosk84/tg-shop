@@ -1290,7 +1290,7 @@ async def main():
         telegram_bot = TelegramBot()
         
         # Создаем приложение
-        application = Application.builder().token(BOT_TOKEN).build()
+        application = Application.builder().token(TOKEN).build()
         
         # Настраиваем обработчики
         telegram_bot.setup_handlers(application)
