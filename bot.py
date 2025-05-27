@@ -1299,11 +1299,20 @@ async def main():
         application.post_init = telegram_bot.post_init
         application.post_shutdown = telegram_bot.cleanup
         
+        # Получаем URL приложения из переменных окружения
+        app_url = os.getenv('APP_URL')
+        
         # Запускаем cron сервер для автоматических начислений
-        cron_server = CronServer(telegram_bot.db)
-        await cron_server.start()
+        if app_url:
+            cron_server = CronServer(app_url)
+            await cron_server.start()
+        else:
+            telegram_bot.logger.warning("APP_URL not set in environment variables")
         
         telegram_bot.logger.info("🚀 Starting telegram bot...")
+        
+        # Настройка порта для Render
+        port = int(os.getenv('PORT', '8080'))
         
         # Запускаем бота
         await application.run_polling(
@@ -1312,7 +1321,8 @@ async def main():
             read_timeout=30,
             write_timeout=30,
             connect_timeout=30,
-            drop_pending_updates=True
+            drop_pending_updates=True,
+            webhook_url=f"https://{os.getenv('APP_URL')}/{TOKEN}/webhook"
         )
         
     except KeyboardInterrupt:

@@ -10,4 +10,4 @@ COPY . .
 # Делаем start.sh исполняемым
 RUN chmod +x start.sh
 
-CMD ["./start.sh"]
+CMD ["python", "bot.py"]
