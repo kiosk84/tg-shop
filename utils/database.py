@@ -45,21 +45,30 @@ class Database:
 
     def get_referral(self, referrer_id: int, referred_id: int) -> Optional[Referral]:
         """Получить реферальную связь"""
+        referrer = self.get_user(referrer_id)
+        referred = self.get_user(referred_id)
+        if not referrer or not referred:
+            logger.warning(f"Не удалось получить реферал: referrer={referrer_id}, referred={referred_id}")
+            return None
         return self.session.query(Referral)\
-            .join(User, Referral.referrer_id == User.id)\
-            .filter(User.user_id == referrer_id)\
-            .join(User, Referral.referred_id == User.id)\
-            .filter(User.user_id == referred_id)\
+            .filter(Referral.referrer_id == referrer.id, Referral.referred_id == referred.id)\
             .first()
 
-    def create_referral(self, referrer_id: int, referred_id: int, bonus: float = 0) -> Referral:
+    def get_user_referrals(self, user_id: int) -> list:
+        """Получить список рефералов пользователя"""
+        user = self.get_user(user_id)
+        if not user:
+            logger.warning(f"Пользователь не найден при запросе рефералов: user_id={user_id}")
+            return []
+        return user.referrals
+
+    def create_referral(self, referrer_id: int, referred_id: int, bonus: float = 0) -> Optional[Referral]:
         """Создать реферальную связь"""
         referrer = self.get_user(referrer_id)
         referred = self.get_user(referred_id)
-        
         if not referrer or not referred:
-            raise ValueError("Один из пользователей не найден")
-            
+            logger.warning(f"Не удалось создать реферал: referrer={referrer_id}, referred={referred_id}")
+            return None
         referral = Referral(
             referrer_id=referrer.id,
             referred_id=referred.id,
@@ -111,6 +120,25 @@ class Database:
             logger.info(f"База данных успешно сохранена в {backup_path}")
         except Exception as e:
             logger.error(f"Ошибка при создании резервной копии: {e}")
+
+    def create_withdrawal_request(self, user_id: int, amount: float, method: str, details: str) -> Optional[WithdrawalRequest]:
+        """Создать заявку на вывод средств"""
+        user = self.get_user(user_id)
+        if not user:
+            logger.warning(f"Не удалось создать заявку на вывод: user_id={user_id} не найден")
+            return None
+        withdrawal = WithdrawalRequest(
+            user_id=user.id,
+            amount=amount,
+            method=method,
+            details=details,
+            date=datetime.now(),
+            status='pending'
+        )
+        user.balance -= amount
+        self.session.add(withdrawal)
+        self.session.commit()
+        return withdrawal
 
     @asynccontextmanager
     async def get_session() -> AsyncGenerator[Session, None]:

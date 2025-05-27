@@ -16,6 +16,13 @@ async def handle_withdraw_request(update: Update, context: ContextTypes.DEFAULT_
     user_id = query.from_user.id
     user = db.get_user(user_id)
     
+    if not user:
+        await query.edit_message_text(
+            text="❌ Пользователь не найден. Пожалуйста, начните с /start.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
     # Если указана сумма, обрабатываем запрос на вывод
     if amount:
         if amount > user.balance:

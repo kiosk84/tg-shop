@@ -152,26 +152,27 @@ async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db = Database()
     user = db.get_user(user_id)
-    
     if not user:
-        text = "❌ Ошибка: пользователь не найден"
-    else:
-        # Получаем статистику инвестиций
-        active_investments = [inv for inv in user.investments if not inv.is_finished]
-        total_profit = sum(inv.current_profit for inv in user.investments)
-        
-        text = f"""💰 *Ваш баланс*: {user.balance}₽
+        if query:
+            await query.edit_message_text(
+                text="❌ Пользователь не найден. Пожалуйста, начните с /start.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Пользователь не найден. Пожалуйста, начните с /start.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        return
 
-📈 *Инвестиции*:
-├ Активных: {len(active_investments)}
-├ Всего вложено: {user.total_invested}₽
-└ Общий доход: {total_profit}₽
+    # Получаем статистику инвестиций
+    active_investments = [inv for inv in user.investments if not inv.is_finished]
+    total_profit = sum(inv.current_profit for inv in user.investments)
+    referral_earnings = sum(ref.bonus_paid for ref in user.referrals)
 
-👥 *Рефералы*:
-└ Заработано: {user.referral_earnings}₽"""
+    text = f"""💰 *Ваш баланс*: {user.balance}₽\n\n📈 *Инвестиции*:\n├ Активных: {len(active_investments)}\n├ Всего вложено: {user.total_invested}₽\n└ Общий доход: {total_profit}₽\n\n👥 *Рефералы*:\n└ Заработано: {referral_earnings}₽"""
 
     keyboard = [[InlineKeyboardButton("« Назад", callback_data='menu')]]
-    
     if query:
         await query.edit_message_text(
             text=text,
