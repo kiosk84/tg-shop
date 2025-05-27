@@ -1314,16 +1314,32 @@ async def main():
         # Настройка порта для Render
         port = int(os.getenv('PORT', '8080'))
         
-        # Запускаем бота
-        await application.run_polling(
-            poll_interval=1.0,
-            timeout=10,
-            read_timeout=30,
-            write_timeout=30,
-            connect_timeout=30,
-            drop_pending_updates=True,
-            webhook_url=f"https://{os.getenv('APP_URL')}/{TOKEN}/webhook"
-        )
+        # Определяем режим работы (webhook или polling)
+        if app_url and os.getenv('RENDER'):
+            # Настройка webhook для Render
+            telegram_bot.logger.info("🚀 Starting in webhook mode...")
+            webhook_url = f"https://{app_url}/{TOKEN}"
+            await application.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+            
+            # Запускаем веб-сервер для обработки вебхуков
+            await application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path=TOKEN,
+                webhook_url=webhook_url,
+                drop_pending_updates=True
+            )
+        else:
+            # Запускаем в режиме long polling
+            telegram_bot.logger.info("🚀 Starting in polling mode...")
+            await application.run_polling(
+                poll_interval=1.0,
+                timeout=10,
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=30,
+                drop_pending_updates=True
+            )
         
     except KeyboardInterrupt:
         telegram_bot.logger.info("🛑 Bot stopped by user")
