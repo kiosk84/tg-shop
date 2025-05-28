@@ -252,7 +252,7 @@ class MessageBuilder:
 └ Средний доход с реферала: *{format_currency(ref_earnings / max(ref_count, 1))}*
 
 📈 *Инвестиционная деятельность:*
-├ Всего инвести fabricatingровано: *{format_currency(user.total_invested)}*
+├ Всего инвестировано: *{format_currency(user.total_invested)}*
 ├ Прибыль с инвестиций: *{format_currency(invest_earnings)}*
 ├ Активных планов: *{active_investments}*
 └ Завершённых планов: *{len(user.investments) - active_investments}*
@@ -1002,9 +1002,7 @@ async def main():
             
             # Настройка порта для Render
             port = int(os.getenv('PORT', '4000'))
-            telegram “
-
-_bot.logger.info(f"🔌 Using port: {port}")
+            telegram_bot.logger.info(f"🔌 Using port: {port}")
             
             # Формируем базовый URL для вебхука
             base_url = app_url.rstrip('/')
