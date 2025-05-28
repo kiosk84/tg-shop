@@ -958,7 +958,7 @@ async def start_webhook(application, webhook_url, port):
         await application.initialize()
         await application.start()
         
-        # Настраиваем веб-сервер
+        # Настраиваем веб-сервер для webhook
         await application.updater.start_webhook(
             listen='0.0.0.0',
             port=port,
@@ -966,31 +966,6 @@ async def start_webhook(application, webhook_url, port):
             webhook_url=webhook_url,
             drop_pending_updates=True
         )
-        
-        # Запускаем HTTP-сервер для проверки работоспособности
-        from http.server import HTTPServer, BaseHTTPRequestHandler
-        import threading
-        
-        class HealthCheckHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                if self.path == '/':
-                    self.send_response(200)
-                    self.send_header('Content-type', 'text/plain')
-                    self.end_headers()
-                    self.wfile.write(b'OK')
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-        
-        def run_health_check():
-            server_address = ('', port)
-            httpd = HTTPServer(server_address, HealthCheckHandler)
-            logger.info(f"Starting health check server on port {port}")
-            httpd.serve_forever()
-        
-        # Запускаем health check в отдельном потоке
-        health_thread = threading.Thread(target=run_health_check, daemon=True)
-        health_thread.start()
         
         logger.info(f"Webhook server started on port {port}")
         return True
@@ -1035,7 +1010,7 @@ async def main():
             telegram_bot.logger.info(f"🔌 Using port: {port}")
             
             # Формируем базовый URL для вебхука
-            base_url = f"https://{app_url}"
+            base_url = app_url.rstrip('/')
             telegram_bot.logger.info(f"🌐 Base URL: {base_url}")
             
             # Запускаем cron сервер для автоматических начислений
@@ -1057,8 +1032,11 @@ async def main():
             telegram_bot.logger.info(f"✅ Webhook server started successfully on port {port}")
             
             # Бесконечный цикл для поддержания работы
-            while True:
-                await asyncio.sleep(3600)  # Проверяем каждый час
+            try:
+                while True:
+                    await asyncio.sleep(3600)  # Проверяем каждый час
+            except KeyboardInterrupt:
+                telegram_bot.logger.info("🛑 Bot stopped by user")
                 
         else:
             # Режим long polling для локальной разработки
@@ -1090,10 +1068,6 @@ async def main():
         
         # Отправляем уведомление админам об ошибке
         if application:
-            error_message = f"""🚨 *КРИТИЧЕСКАЯ ОШИБКА БОТА*
+            error_message = f"""🚨 *КРИТИЧЕСКАЯ ОШИБКА БОТА* [WARNING]
 
-⚠️ Бот остановлен из-за критической ошибки:
-```
-{e}
-```
-"""
+Бот остановлен из-за критической ошибки:"""
