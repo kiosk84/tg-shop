@@ -872,10 +872,10 @@ class TelegramBot:
                  return
 
             # В WithdrawalRequest user_id должен быть telegram_id пользователя
-            withdrawals = self.db.session.query(WithdrawalRequest)\
-                .filter(WithdrawalRequest.user.has(user_id=user.user_id)) # Фильтр по telegram_id связанного юзера
-                .order_by(WithdrawalRequest.date.desc())\
-                .limit(10)\
+            withdrawals = self.db.session.query(WithdrawalRequest) \
+                .filter(WithdrawalRequest.user.has(user_id=user.user_id)) \
+                .order_by(WithdrawalRequest.date.desc()) \
+                .limit(10) \
                 .all()
 
             if not withdrawals:
