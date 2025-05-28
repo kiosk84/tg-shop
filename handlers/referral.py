@@ -3,10 +3,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from config import REFERRAL_BONUS
+from config.settings import REFERRAL_BONUS
 from utils.keyboards import Keyboards
 from utils.database import Database
 from utils.helpers import format_currency, plural_form
+
+# ... existing code ...
 
 db = Database()
 
