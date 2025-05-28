@@ -6,10 +6,9 @@ if [ -f .env ]; then
 fi
 
 # Устанавливаем порт по умолчанию, если не задан
-PORT=${PORT:-3000}
+export PORT=${PORT:-3000}
 
-# Экспортируем переменные для Python
-export PORT=$PORT
+echo "Starting bot on port $PORT"
 
-# Запускаем бота с ожиданием входящих соединений
-python bot.py
+# Запускаем бота
+exec python bot.py
