@@ -979,7 +979,7 @@ async def main():
     cron_server = None
     
     # Получаем порт из переменных окружения
-    port = int(os.getenv('PORT', '3000'))
+    port = int(os.getenv('PORT', '4000'))
     
     try:
         # Создаем экземпляр бота
