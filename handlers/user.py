@@ -5,12 +5,13 @@ from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
-from config import CHANNEL_ID, ADMIN_IDS, REFERRAL_BONUS
+from config.settings import CHANNEL_ID, ADMIN_IDS, REFERRAL_BONUS
 from utils.helpers import format_currency
 from utils.keyboards import Keyboards
 from utils.database import Database
 from models.user import User
 
+# ... existing code ...
 db = Database()
 
 async def check_channel_subscription(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
